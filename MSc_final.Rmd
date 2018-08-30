@@ -1,0 +1,369 @@
+## Step by step metabolomics data analysis, two-class predictive models evaluation by leave-one-out cross-validation method
+```{r}
+library(dplyr)
+library(ggplot2)
+library(openxlsx)
+library(ggrepel)
+library(MASS)
+library(factoextra)
+library(corrplot)
+library(klaR)
+library(caret)
+library(randomForest)
+library(scales)
+library(plotROC)
+library(ggpubr)
+read.xlsx('~/MulScr.xlsx', sheet = 1, startRow=1, colNames = TRUE, rowNames = FALSE, detectDates = FALSE, skipEmptyRows = TRUE,
+          skipEmptyCols = TRUE, rows = NULL, cols = NULL, check.names = FALSE,
+          namedRegion = NULL, na.strings = "NA", fillMergedCells = FALSE) -> MSc_data
+
+character() -> class_vector
+```
+## view classes of columns in data frame, convert to numeric class for calculations
+```{r}
+as.numeric(MSc_data$Area) -> MSc_data$Area
+as.numeric(MSc_data$Height) -> MSc_data$Height
+as.numeric(MSc_data$Signal.Noise) -> MSc_data$Signal.Noise 
+as.factor(MSc_data$Group) -> MSc_data$Group
+as.factor(MSc_data$Series) -> MSc_data$Series
+as.factor(MSc_data$Rep) -> MSc_data$Rep
+```
+###### Working with QC samples
+
+```{r}
+subset(MSc_data, Series == 1) -> Ser1_MSc_data
+subset(MSc_data, Series == 2) -> Ser2_MSc_data
+```
+#### Control series 1
+```{r}
+subset(Ser1_MSc_data, Group == 4) -> L1_data_ser1 ## working with L1 data
+subset(Ser1_MSc_data, Group == 5) -> L2_data_ser1 ## working with L2 data
+L1_data_ser1[complete.cases(L1_data_ser1), ] -> L1_data_ser1 ## remove rows with NA from data frame
+L1_data_ser1$Conc.category <-cut(L1_data_ser1$Max.Conc, c(0,10,80,700), right=FALSE, labels=c(1:3))
+L2_data_ser1[complete.cases(L2_data_ser1), ] -> L2_data_ser1
+L2_data_ser1$Conc.category <-cut(L2_data_ser1$Max.Conc, c(0,8,120,1500), right=FALSE, labels=c(1:3))
+```
+### plotting QC control of series 1:
+## L1 control
+```{r}
+pdf("~/MSc_ser1_L1_control.pdf")
+ggplot(L1_data_ser1, aes(Component.Name, Calc.Conc, color = Index)) + facet_wrap(~ Conc.category, scales = "free", nrow=1, ncol = 3) + ylab(paste("Concentration, nmol/ml")) + 
+  xlab(paste("Metabolites")) + geom_point(size = 3) + theme_light() +
+  theme(axis.text.x=element_text(angle = -45, hjust = 0, size = 8, face = "bold"), axis.text.y=element_text(size=12), axis.title = element_text(size = 15), title = element_text(size = 15), text = element_text(size = 10), line = element_line(size=1)) +
+  ggtitle("L1 levels of series 1 control") -> L1_ser1_plot
+L1_ser1_plot + geom_linerange(aes(Component.Name, ymin=Min.Conc, ymax=Max.Conc)) + geom_point(aes(Component.Name, Nominal.Conc), color = "red", size = 3) -> L1_ser1_plot
+L1_ser1_plot
+dev.off()
+L1_ser1_plot
+```
+## L2 control
+```{r}
+pdf("~/MSc_ser1_L2_control.pdf")
+ggplot(L2_data_ser1, aes(Component.Name, Calc.Conc, color = Index)) + facet_wrap(~ Conc.category, scales = "free", nrow=1, ncol = 3) + ylab(paste("Concentration, nmol/ml")) + 
+  xlab(paste("Metabolites")) + geom_point(size = 3) + theme_light() +
+  theme(axis.text.x=element_text(angle = -45, hjust = 0, size = 8, face = "bold"), axis.text.y=element_text(size=12), axis.title = element_text(size = 15), title = element_text(size = 15), text = element_text(size = 10), line = element_line(size=1)) +
+  ggtitle("L2 levels of series 1 control") -> L2_ser1_plot
+L2_ser1_plot + geom_linerange(aes(Component.Name, ymin=Min.Conc, ymax=Max.Conc)) + geom_point(aes(Component.Name, Nominal.Conc), color = "red", size = 3) -> L2_ser1_plot
+L2_ser1_plot
+dev.off()
+L2_ser1_plot
+```
+#### Control series 2
+```{r}
+subset(Ser2_MSc_data, Group == 4) -> L1_data_ser2 ## working with L1 data
+subset(Ser2_MSc_data, Group == 5) -> L2_data_ser2 ## working with L2 data
+L1_data_ser2[complete.cases(L1_data_ser2), ] -> L1_data_ser2 ## remove rows with NA from data frame
+L1_data_ser2$Conc.category <-cut(L1_data_ser2$Max.Conc, c(0,10,80,700), right=FALSE, labels=c(1:3))
+L2_data_ser2[complete.cases(L2_data_ser2), ] -> L2_data_ser2
+L2_data_ser2$Conc.category <-cut(L2_data_ser2$Max.Conc, c(0,8,120,1500), right=FALSE, labels=c(1:3))
+```
+
+### plotting QC control of series 2:
+## L1 control
+```{r}
+pdf("~/MSc_ser2_L1_control.pdf")
+ggplot(L1_data_ser2, aes(Component.Name, Calc.Conc, color = Index)) + facet_wrap(~ Conc.category, scales = "free", nrow=1, ncol = 3) + ylab(paste("Concentration, nmol/ml")) + 
+  xlab(paste("Metabolites")) + geom_point(size = 3) + theme_light() +
+  theme(axis.text.x=element_text(angle = -45, hjust = 0, size = 8, face = "bold"), axis.text.y=element_text(size=12), axis.title = element_text(size = 15), title = element_text(size = 15), text = element_text(size = 10), line = element_line(size=1)) +
+  ggtitle("L1 levels of series 2 control") -> L1_ser2_plot
+L1_ser2_plot + geom_linerange(aes(Component.Name, ymin=Min.Conc, ymax=Max.Conc)) + geom_point(aes(Component.Name, Nominal.Conc), color = "red", size = 3)
+dev.off()
+```
+
+###### Working with samples
+
+```{r}
+subset(MSc_data, Group %in% c(1,2,3)) -> MSc_data1 ## subset patient and control group
+arrange(MSc_data1, Sample.Name) -> MSc_data1
+MSc_data1[, 1:(ncol(MSc_data)-3)] -> MSc_data1
+MSc_data1[complete.cases(MSc_data1), ] -> MSc_data1 ## removing rows with NA
+filter(MSc_data1, Signal.Noise >= 2.0) -> MSc_quant ## removing rows with non-quantitative signals
+```
+
+## Transposing metabolites to variables in new data frame
+```{r}
+unique(MSc_quant$Component.Name) -> Component
+filter(MSc_quant, Component.Name == "Arginine") -> sub_Arg ## it doesn't mean why I choose Arg, just representive metabolite
+Sample.Name <- sub_Arg$Sample.Name
+sub_Arg$Rep -> Rep
+as.data.frame(cbind(Rep, Sample.Name)) -> zero_frame
+sub_Arg$Group -> Group
+for(i in 1:length(Component)) {
+  filter(MSc_quant, Component.Name == Component[i]) -> output_comp
+  left_join(zero_frame, output_comp[, c(4, 2, 13)], by = c("Rep", "Sample.Name")) -> zero_frame ## building data frame which variables are metabolites
+}
+as.data.frame(cbind(Group, zero_frame)) -> result_table 
+names(result_table) <- c("Group", "Rep", "Sample.Name", Component)
+```
+
+## Replacing NA with duplicate values of the same Sample or calculating average values
+```{r}
+zero_sample <- data.frame(matrix(ncol = length(Component), nrow = 0))
+names(zero_sample) <- Component
+for(i in 1:length(unique(result_table$Sample.Name))) {
+subset(result_table, Sample.Name == unique(result_table$Sample.Name)[i]) -> sub_sample
+    colMeans(sub_sample[, 4:ncol(sub_sample)], na.rm = T) -> v_sub
+    rbind(zero_sample, v_sub) -> zero_sample
+}
+Component -> names(zero_sample)
+unique(Sample.Name) -> Sample.Name
+as.numeric(as.character(Group)) -> Group
+Group[seq(length(Group)) %% 2 == 1] -> Group
+cbind(Group, Sample.Name, zero_sample) -> results
+results -> set.mean ## data for supervised analysis below
+```
+
+## Data cleaning and scaling for unsupervised PCA analysis
+```{r}
+results[, -which(colMeans(is.na(results)) > 0.3)] -> set30 ## Filtering NA values:
+Meanf=function(x){
+  x<-as.numeric(as.character(x)) #first convert each column into numeric from factor
+  x[is.na(x)] =mean(x, na.rm=TRUE) #convert the item with NA to mean value from the column
+  x #display the column
+}
+clean_df=data.frame(apply(set30, 2, Meanf))
+set30$Sample.Name -> clean_df$Sample.Name
+
+normalize <- function(x) {
+  return ((x - min(x)) / (max(x) - min(x)))
+}
+dfNorm <- as.data.frame(lapply(clean_df[3:ncol(clean_df)], normalize))
+cbind(set30[, 1:2], dfNorm) -> scaled_MSc
+scaled_MSc$Group <- as.character(scaled_MSc$Group)
+scaled_MSc$Group[scaled_MSc$Group == "1"] <- "Control"
+scaled_MSc$Group[scaled_MSc$Group == "2"] <- "Multiple.Sclerosis"
+scaled_MSc$Group[scaled_MSc$Group == "3"] <- "Neurodegeneration"
+```
+
+## Unsupervised exploratory data analysis and visualization
+```{r}
+filter(scaled_MSc, Group == "Control" | Group == "Multiple.Sclerosis") -> scaled_MSc_only
+df_MSc_pca <- prcomp(scaled_MSc_only[, -1:-2], center = T) ## pca only for two groups: MSc and Control
+groups <- as.factor(scaled_MSc_only$Group)
+
+pdf("var_pca_MSc.pdf") ## vizualization of correlation between variables in data frame
+fviz_pca_var(df_MSc_pca,
+             geom.var = c("point", "text"),
+             col.var = "contrib",
+             gradient.cols = c("#43A2CA", "#F9F202", "#FC4E07"),
+             repel = TRUE,
+             labelsize = 6, pointsize = "contrib", 
+             pointshape = 19, 
+             legend.title = list(color = "contrib")) + 
+  theme(text = element_text(size = 20)) + scale_size_continuous(range = c(3,7)) -> var.p.MSc
+ggpubr::ggpar(var.p.MSc, xlab = paste("PC1=", round((get_eigenvalue(df_MSc_pca)$variance.percent[1]), 2), "%"), ylab = paste("PC2=", round((get_eigenvalue(df_MSc_pca)$variance.percent[2]), 2), "%")) -> var.p.MSc
+var.p.MSc
+dev.off()
+var.p.MSc
+pdf("pca_ind_MSc.pdf") ## vizualization of correlation between individuals in data frame            
+fviz_pca_ind(df_MSc_pca,
+             col.ind = groups, # Color by groups
+             palette = c("#31A354", "#F03B20"),
+             addEllipses = TRUE, # Concentration ellipses
+             ellipse.type = "t", ellipse.level = 0.95,
+             legend.title = "Groups",
+             repel = TRUE,
+             labelsize = 4, pointsize = 3, pointshape = 19) + 
+  theme(text = element_text(size = 20), legend.position = c(0.8, 0.22)) -> ind.p.MSc
+ggpubr::ggpar(ind.p.MSc, subtitle = "t-distribution, 95% CI",  xlab = paste("PC1=", round((get_eigenvalue(df_MSc_pca)$variance.percent[1]), 2), "%"), ylab = paste("PC2=", round((get_eigenvalue(df_MSc_pca)$variance.percent[2]), 2), "%"))
+dev.off()
+
+pdf("Eigenvalue_disrib_MSc.pdf")
+fviz_eig(df_MSc_pca, addlabels = TRUE, ylim = c(0, 35)) + theme(text = element_text(size = 20)) -> contrib1_MSc
+ggpar(contrib1_MSc, title = "Eigenvalue distribution") -> contrib1_MSc
+contrib1_MSc
+dev.off()
+contrib1_MSc
+
+var_MSc <- get_pca_var(df_MSc_pca)
+pdf("var_conribution_MSc.pdf")
+corrplot(var_MSc$contrib, is.corr=FALSE, title = "Contribution of variables in variance", cex.main = 1.5, mar = c(1,1,3,1), tl.cex = 1, cl.cex = 1)  -> all_var1_MSc
+dev.off()
+pdf("quality_repr_components_MSc.pdf")
+corrplot(var_MSc$cos2, is.corr=FALSE, title = "Quality of variable representation", cex.main = 1.5, mar = c(0,0,5,1), tl.cex = 1, cl.cex = 1)  -> all_var2_MSc
+dev.off()
+```
+
+#### Supervised analysis applying lda on determined principal components, plsda as alternative method
+```{r}
+matrix.Msc <- as.matrix(scaled_MSc_only[,c(3:30)])
+M <- round(cor(matrix.Msc), 4)
+pdf("MSc_var_cor.pdf")
+corrplot(M, diag = FALSE, method="color", order="FPC", tl.srt = 90, title = "Correlation between variables (MSc-Control data)", cex.main = 1.5, mar = c(1,0,2,1), tl.cex = 1, cl.cex = 1) -> cor_vars ## many vars correlated with each other ## determine how features correlated with each other (to decide wheter to do lda direct or to reduce demension of the data)
+dev.off()
+```
+
+## cleaning and scaling data for supervised analysis of two classes
+```{r}
+as.factor(set.mean$Group) -> set.mean$Group
+subset(set.mean, Group==1) -> sub_mean1
+subset(set.mean, Group==2) -> sub_mean2
+sub_mean1[, -which(colMeans(is.na(sub_mean1)) > 0.3)] -> sub_mean1
+sub_mean2[, -which(colMeans(is.na(sub_mean2)) > 0.3)] -> sub_mean2
+clean_df1=data.frame(apply(sub_mean1, 2, Meanf))
+sub_mean1$Sample.Name -> clean_df1$Sample.Name
+clean_df2=data.frame(apply(sub_mean2, 2, Meanf))
+sub_mean2$Sample.Name -> clean_df2$Sample.Name
+clean_df1[, which(names(clean_df1) %in% names(clean_df2))] -> df1
+clean_df2[, which(names(clean_df2) %in% names(df1))] -> df2
+rbind(df1, df2) -> MSc_Control
+
+dfNorm1 <- as.data.frame(lapply(MSc_Control[3:ncol(MSc_Control)], normalize))
+cbind(MSc_Control[, 1:2], dfNorm1) -> scaled_MSc_C_sup
+scaled_MSc_C_sup$Group <- as.character(scaled_MSc_C_sup$Group)
+scaled_MSc_C_sup$Group[scaled_MSc_C_sup$Group == "1"] <- "Control"
+scaled_MSc_C_sup$Group[scaled_MSc_C_sup$Group == "2"] <- "Multiple.Sclerosis"
+as.factor(scaled_MSc_C_sup$Group) -> scaled_MSc_C_sup$Group
+```
+
+## PLS-DA supervised analysis
+```{r}
+plsda(x = scaled_MSc_C_sup[, -1:-2], y = scaled_MSc_C_sup[, 1], ncomp = 2, probMethod = "Softmax", cv = "LOO") -> plsda.df.MSc
+as.data.frame(predict(plsda.df.MSc, newdata = scaled_MSc_C_sup[, -1:-2], ncomp = 2, type = "prob")) -> plsda_MSc_class
+as.character(predict(plsda.df.MSc, newdata = scaled_MSc_C_sup[, -1:-2], ncomp = 2, type = "class")) -> plsda_data_MSc
+```
+## ggplot supervised analysis [PLSDA]
+```{r}
+as.numeric(plsda.df.MSc$scores[(1:28)]) -> Comp1
+as.numeric(plsda.df.MSc$scores[(29:56)]) -> Comp2 ## Notice it dependnds from number of the variables
+scaled_MSc_C_sup$Group -> Group
+as.data.frame(cbind(Comp1, Comp2, Group)) -> plot_PLSda
+plot_PLSda$Group <- as.character(plot_PLSda$Group)
+plot_PLSda$Group[plot_PLSda$Group == "1"] <- "Control"
+plot_PLSda$Group[plot_PLSda$Group == "2"] <- "Multiple.Sclerosis"
+factor(plot_PLSda$Group) -> Group
+prob.plsda <- plsda.df.MSc$Xvar^2/sum(plsda.df.MSc$Xvar^2)
+scale(as.numeric(plot_PLSda$Comp1)) -> plot_PLSda$Comp1
+scale(as.numeric(plot_PLSda$Comp2)) -> plot_PLSda$Comp2
+pdf("PLS-da_MSc.pdf")
+p2 <- ggplot(plot_PLSda, aes(Comp1, Comp2, colour = Group)) + geom_point(size = 3) + 
+  labs(x = paste("Comp1 (", percent(prob.plsda[1]), ")", sep=""), y = paste("Comp2 (", percent(prob.plsda[2]), ")", sep="")) +
+  scale_color_manual(values=c("#31A354", "#F03B20")) + ggtitle("PLS-DA of individuals by groups")  + theme_light() +
+  stat_ellipse(mapping = NULL, data = NULL, geom = "path", position = "identity", type = "t", level = 0.95, segments = 51)
+p2 + theme(text = element_text(size = 16)) -> p2
+p2
+dev.off()
+p2
+```
+## PCA-LDA supervised analysis
+## PCA preprocessing and selecting number of components
+```{r}
+df_MSc_sup_pca <- prcomp(scaled_MSc_C_sup[, -1:-2], center = T) ## pca only for two groups: MSc and Control
+groups <- as.factor(scaled_MSc_C_sup$Group)
+post.pca.MSc <- df_MSc_sup_pca$x[, 1:8] ## number of components to use were determined in unsupervised analysis
+Group1 <- as.character(scaled_MSc_C_sup$Group)
+Group1[Group1 == "Control"] <- "1"
+Group1[Group1 == "Multiple.Sclerosis"] <- "2"
+as.data.frame(cbind(post.pca.MSc, Group)) -> post.pca.MSc
+as.factor(post.pca.MSc$Group) -> post.pca.MSc$Group
+lda(Group ~ ., data = post.pca.MSc, CV = T) -> MSc.pca.lda
+prop.MSc.lda <- MSc.pca.lda$svd^2/sum(MSc.pca.lda$svd^2)
+as.factor(post.pca.MSc$Group) -> post.pca.MSc$Group
+tab <- table(post.pca.MSc$Group, MSc.pca.lda$class)
+dimnames(tab) <- list(Actual = c("Ctrl", "MSc"), "Predicted (cv)" = c("Ctrl","MSc"))
+conCV1 <- rbind(tab[1, ]/sum(tab[1, ]), tab[2, ]/sum(tab[2, ]))
+rownames(conCV1) <- c(Actual = c("Ctrl", "MSc"))
+print(round(conCV1, 4))
+```
+
+#### Model training and LOOCV resampling, preparing data for ROC-plotting
+## PCA-LDA Model
+```{r}
+Model_pcaLDA_loocv <- train(Group ~., data=scaled_MSc_C_sup[, -2], method = "lda", preProcess = "pca",
+                             trControl = trainControl(method="LOOCV", summaryFunction=twoClassSummary, classProbs=T),
+                            savePredictions = TRUE, preProcOptions = list(pcaComp = 8))
+Modeltype <- factor(rep("PCA-LDA", nrow(Model_pcaLDA_loocv$pred)))
+cbind(Model_pcaLDA_loocv$pred, Modeltype) -> pca.lda.MSc
+pca.lda.MSc[, which(colnames(pca.lda.MSc)!=c("rowIndex", "parameter"))] ->  pca.lda.MSc
+```
+
+## Random forest Model building and estimation
+```{r}
+set.seed(528)
+Model_RF_loocv <- train(Group ~., data=scaled_MSc_C_sup[, -2], method = "rf",
+                              trControl = trainControl(method="LOOCV", summaryFunction=twoClassSummary, classProbs=T), ntree=50, tuneGrid = expand.grid(.mtry=c(6:28)),
+                              savePredictions = TRUE)
+Modeltype <- factor(rep("RF", nrow(Model_RF_loocv$pred)))
+cbind(Model_RF_loocv$pred, Modeltype) -> RF.MSc
+RF.MSc[, which(colnames(RF.MSc)!=c("rowIndex", "mtry"))] ->  RnF.MSc
+## Plotting random forest and export results
+plot(Model_RF_loocv)
+write.xlsx(Model_RF_loocv$results, "~/randomForest.xlsx")
+```
+
+#### ROC plots comparing three Models:
+```{r}
+pca.lda.MSc$obs -> obs
+cbind(plsda_data_MSc, obs, plsda_MSc_class) -> plsda.MSc
+Modeltype <- as.character(factor(rep("PLSDA", length(plsda_data_MSc))))
+cbind(plsda.MSc, Modeltype) -> plsda.data.MSc
+factor <- function(f) { as.factor(f) }
+as.data.frame(apply(plsda.data.MSc, 2, factor)) -> plsda.data.MSc
+names(plsda.data.MSc) <- names(pca.lda.MSc)
+
+rbind(pca.lda.MSc, RnF.MSc, plsda.data.MSc) -> MSc_ROC
+factor(MSc_ROC$obs) -> MSc_ROC$obs
+as.numeric(MSc_ROC$Control) -> MSc_ROC$Control
+as.numeric(MSc_ROC$Multiple.Sclerosis) -> MSc_ROC$Multiple.Sclerosis
+pdf("ROC_MSc.pdf")
+ggplot(MSc_ROC, aes(m=Multiple.Sclerosis, d=obs, colour = Modeltype)) + geom_roc(n.cuts = 0) +
+  coord_equal() + style_roc(xlab = "False positive fraction (1 - specificity)", ylab = "True positive fraction (sensitivity)") +
+  labs(title = "LOOCV model comparison", subtitle = "MSc vs Control groups") + color_palette(palette = c("#F61414", "#0054A3", "#2CA25F")) + 
+  theme(axis.text.x=element_text(angle = -45, hjust = 0), axis.text = element_text(size=rel(1.1)), axis.title = element_text(size=rel(1.3)), legend.text = element_text(size = rel(1.0)), legend.title = element_text(size = rel(1.0)), plot.title = element_text(face = "bold", hjust = 0.7, size = 14), plot.subtitle = element_text(size = 14)) -> ROC2
+
+ROC2 + annotate("text", x=0.70, y=0.35, colour = "#F61414", label=paste("AUC =", round((calc_auc(ROC2))$AUC[1], 4))) + 
+  annotate("text", x=0.70, y=0.275, colour = "#0054A3", label=paste("AUC =", round((calc_auc(ROC2))$AUC[2], 4))) +
+  annotate("text", x=0.70, y=0.2, colour = "#2CA25F", label=paste("AUC =", round((calc_auc(ROC2))$AUC[3], 4)))-> ROC2
+ROC2
+dev.off()
+ROC2
+```
+## Plotting pca-lda separation between two groups
+```{r}
+lda(Group ~ ., data = post.pca.MSc, CV = FALSE) -> MSc.pca.lda
+plda_MSc <- predict(object = MSc.pca.lda, newdata = post.pca.MSc)
+lda_MSc_plot <- data.frame(Group = post.pca.MSc$Group, plda_MSc$x)
+lda_MSc_plot$Group <- as.character(lda_MSc_plot$Group)
+lda_MSc_plot$Group[lda_MSc_plot$Group == "1"] <- "Control"
+lda_MSc_plot$Group[lda_MSc_plot$Group == "2"] <- "Multiple.Sclerosis"
+factor(lda_MSc_plot$Group) -> Group
+pdf("pca-lda_MSc_LD1.pdf")
+p1_MSc <- ggplot(lda_MSc_plot, aes(x=LD1, colour = Group)) + geom_density(aes(fill = Group), alpha=0.7, position="identity") + 
+  scale_color_manual(values=c("#31A354", "#F03B20")) + ggtitle("LDA of top 8 contribition PCs")  +
+  theme_light() + geom_vline(xintercept = -0.06) + scale_x_continuous(limits = c(-3.8, 4)) 
+p1_MSc + theme(text = element_text(size = 16)) -> p1_MSc
+p1_MSc
+dev.off()
+p1_MSc
+```
+
+
+
+
+
+
+
+
+
+
+
