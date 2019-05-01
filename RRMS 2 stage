@@ -1,0 +1,914 @@
+library(dplyr)
+library(ggplot2)
+library(openxlsx)
+library(MASS)
+library(factoextra)
+library(cvAUC)
+library(caret)
+library(randomForest)
+library(scales)
+library(plotROC)
+library(ggpubr)
+library(gridExtra)
+library(cowplot) 
+
+## Data processing for the protocol without derivatization
+read.xlsx('~/MSc_plasma_underiv.xlsx', sheet = 1, startRow=1, colNames = TRUE, rowNames = FALSE, detectDates = FALSE, skipEmptyRows = TRUE,
+          skipEmptyCols = TRUE, rows = NULL, cols = NULL, check.names = FALSE,
+          namedRegion = NULL, na.strings = "NA", fillMergedCells = FALSE) -> MSc_data
+head(MSc_data)
+tail(MSc_data)
+as.numeric(MSc_data$Area) -> MSc_data$Area
+as.numeric(MSc_data$IS.Area) -> MSc_data$IS.Area
+dim(MSc_data)
+MSc_data[, 1:13] -> MSc_data
+filter(MSc_data, Series == 1) -> MSc_data_subset
+filter(MSc_data_subset, Rep == 1) -> MSc_data_rep
+unique(MSc_data_rep$Sample.Name) -> sample_vector
+filter(MSc_data_rep, Sample.Name==sample_vector[1]) -> sample1
+unique(sample1$IS.Name)
+
+as.numeric(rep(NA, length(sample1$Component.Name))) ->  IS.Area
+head(sample1[, 1:9])
+for(i in 1:nrow(sample1)){
+  ifelse(sample1$IS.Name[i] %in% sample1$Component.Name, sample1[which(sample1$Component.Name==sample1$IS.Name[i]), 9], NA) -> IS.Area[i]
+}
+
+MSc_data1 <- data.frame(matrix(ncol = ncol(MSc_data), nrow = 0))
+for(i in 1:length(unique(MSc_data$Series))) {
+  filter(MSc_data, Series == i) -> MSc_data_subset
+  MSc_data_subset1 <- data.frame(matrix(ncol = ncol(MSc_data_subset), nrow = 0))
+  for(j in 1:length(unique(MSc_data_subset$Rep))) {
+    filter(MSc_data_subset, Rep == j) -> MSc_data_rep
+    MSc_data_rep1 <- data.frame(matrix(ncol = ncol(MSc_data_rep), nrow = 0))
+    for(k in 1:length(unique(MSc_data_rep$Sample.Name))){
+      filter(MSc_data_rep, Sample.Name == unique(MSc_data_rep$Sample.Name)[k]) -> MSc_data_rep_sample
+      as.numeric(rep(NA, length(MSc_data_rep_sample$Component.Name))) -> IS.Area
+      for(l in 1:nrow(MSc_data_rep_sample)){
+          ifelse(MSc_data_rep_sample$IS.Name[l] %in% MSc_data_rep_sample$Component.Name, MSc_data_rep_sample[which(MSc_data_rep_sample$Component.Name==MSc_data_rep_sample$IS.Name[l]), 9], NA) -> IS.Area[l]
+          IS.Area -> MSc_data_rep_sample$IS.Area
+      }
+      rbind(MSc_data_rep1, MSc_data_rep_sample) -> MSc_data_rep1
+    }
+    rbind(MSc_data_subset1, MSc_data_rep1) -> MSc_data_subset1
+  }
+  rbind(MSc_data1, MSc_data_subset1) -> MSc_data1
+  }
+filter(MSc_data1, IS.Name!="NA") -> MSc_data2
+mutate(MSc_data2, Calculated.Concentration=Area/IS.Area*IS.Actua.Concentration) -> MSc_data_calc
+subset(MSc_data_calc, Group %in% c(1,2)) -> MSc_data_samples
+MSc_data_samples[, 1:13] -> MSc_data_samples
+write.xlsx(MSc_data_samples, "~/MSc_data1_underiv.xlsx")
+## working with QC samples
+subset(MSc_data_calc, Group %in% c(3,4)) -> MSc_data_QC
+unique(MSc_data_QC$Sample.Name) -> L1L2_vector
+subset(MSc_data_QC, Sample.Name %in% L1L2_vector[c(1,3)]) -> L1_interassay_MSc15
+subset(MSc_data_QC, Sample.Name %in% L1L2_vector[c(2,4)]) -> L2_interassay_MSc15
+L1_interassay_MSc15[complete.cases(L1_interassay_MSc15[ , 11]), ] -> L1_interassay_MSc15
+L2_interassay_MSc15[complete.cases(L2_interassay_MSc15[ , 11]), ] -> L2_interassay_MSc15
+L1_interassay_MSc15[-which(L1_interassay_MSc15$Component.Name =="C18:2OH-Carnitine"), ] -> L1_interassay_MSc15
+L2_interassay_MSc15[-which(L2_interassay_MSc15$Component.Name =="C18:2OH-Carnitine"), ] -> L2_interassay_MSc15
+unique(L1_interassay_MSc15$Component.Name) -> Metabolite_v
+unique(L2_interassay_MSc15$Component.Name) -> Metabolite_v_L2
+
+## interassay analysis of the variance QC samples
+## L1
+p.value.interassay <- c("Component.Name", "p.value.L1")
+data.frame(matrix(, nrow=0, ncol=2)) -> p.value.metabolites
+names(p.value.metabolites) <- p.value.interassay
+for(i in 1:length(Metabolite_v)) {
+  subset(L1_interassay_MSc15, Component.Name == Metabolite_v[i]) -> sub_L1_interassay_MSc15 
+  sub_L1_interassay_MSc15[which(sub_L1_interassay_MSc15$Series==1), ] -> ser1_sub_L1_interassay_MSc15
+  sub_L1_interassay_MSc15[which(sub_L1_interassay_MSc15$Series==2), ] -> ser2_sub_L1_interassay_MSc15
+    ser1_sub_L1_interassay_MSc15[-which.max(abs(ser1_sub_L1_interassay_MSc15$Calculated.Concentration-median(ser1_sub_L1_interassay_MSc15$Calculated.Concentration, na.rm = TRUE))), 11] -> two_value_vector_ser1
+    ser2_sub_L1_interassay_MSc15[-which.max(abs(ser2_sub_L1_interassay_MSc15$Calculated.Concentration-median(ser2_sub_L1_interassay_MSc15$Calculated.Concentration, na.rm = TRUE))), 11] -> two_value_vector_ser2
+  t.test(ser1_sub_L1_interassay_MSc15$Calculated.Concentration, ser2_sub_L1_interassay_MSc15$Calculated.Concentration, paired = TRUE, alternative = "two.sided") -> t.test.allvalues
+  t.test(two_value_vector_ser1, ser2_sub_L1_interassay_MSc15$Calculated.Concentration, paired = FALSE, alternative = "two.sided") -> t.test.ser1
+  t.test(two_value_vector_ser2, ser1_sub_L1_interassay_MSc15$Calculated.Concentration, paired = FALSE, alternative = "two.sided") -> t.test.ser2
+  t.test(two_value_vector_ser1, two_value_vector_ser2, paired = TRUE, alternative = "two.sided") -> t.test.ser1.ser2
+  min(t.test.allvalues$p.value, t.test.ser1$p.value, t.test.ser2$p.value, t.test.ser1.ser2$p.value, na.rm = TRUE) -> min.p.value 
+  data.frame(cbind(Metabolite_v[i], min.p.value)) -> output.p.value
+  names(output.p.value) <- p.value.interassay
+  rbind(p.value.metabolites, output.p.value) -> p.value.metabolites
+  names(p.value.metabolites) <- p.value.interassay
+}
+p.value.metabolites
+## L2
+p.value.interassay.L2 <- c("Component.Name", "p.value.L2")
+data.frame(matrix(, nrow=0, ncol=2)) -> p.value.metabolites.L2
+for(i in 1:length(Metabolite_v_L2)) {
+  subset(L2_interassay_MSc15, Component.Name == Metabolite_v_L2[i]) -> sub_L2_interassay_MSc15 
+  sub_L2_interassay_MSc15[which(sub_L2_interassay_MSc15$Series==1), ] -> ser1_sub_L2_interassay_MSc15
+  sub_L2_interassay_MSc15[which(sub_L2_interassay_MSc15$Series==2), ] -> ser2_sub_L2_interassay_MSc15
+  ser1_sub_L2_interassay_MSc15[-which.max(abs(ser1_sub_L2_interassay_MSc15$Calculated.Concentration-median(ser1_sub_L2_interassay_MSc15$Calculated.Concentration, na.rm = TRUE))), 11] -> two_value_vector_ser1
+  ser2_sub_L2_interassay_MSc15[-which.max(abs(ser2_sub_L2_interassay_MSc15$Calculated.Concentration-median(ser2_sub_L2_interassay_MSc15$Calculated.Concentration, na.rm = TRUE))), 11] -> two_value_vector_ser2
+  t.test(ser1_sub_L2_interassay_MSc15$Calculated.Concentration, ser2_sub_L2_interassay_MSc15$Calculated.Concentration, paired = TRUE, alternative = "two.sided") -> t.test.allvalues
+  t.test(two_value_vector_ser1, ser2_sub_L2_interassay_MSc15$Calculated.Concentration, paired = FALSE, alternative = "two.sided") -> t.test.ser1
+  t.test(two_value_vector_ser2, ser1_sub_L2_interassay_MSc15$Calculated.Concentration, paired = FALSE, alternative = "two.sided") -> t.test.ser2
+  t.test(two_value_vector_ser1, two_value_vector_ser2, paired = TRUE, alternative = "two.sided") -> t.test.ser1.ser2
+  min(t.test.allvalues$p.value, t.test.ser1$p.value, t.test.ser2$p.value, t.test.ser1.ser2$p.value, na.rm = TRUE) -> min.p.value 
+  data.frame(cbind(Metabolite_v_L2[i], min.p.value)) -> output.p.value
+  names(output.p.value) <- p.value.interassay.L2
+  rbind(p.value.metabolites.L2, output.p.value) -> p.value.metabolites.L2
+  names(p.value.metabolites.L2) <- p.value.interassay.L2
+}
+p.value.metabolites.L2
+## merge L1 L2 p.values and filtering metabolites interassay p < 0.05
+left_join(p.value.metabolites, p.value.metabolites.L2, by = "Component.Name") -> underived.QC
+apply(underived.QC[, 2:3], 1, min) -> class(min.p.value)
+as.data.frame(cbind(as.character(underived.QC$Component.Name), min.p.value)) -> p.value.QC
+names(p.value.QC) <- c("Component.Name", "p.value.QC")
+as.numeric(as.character(p.value.QC$p.value.QC)) -> p.value.QC$p.value.QC
+filter(p.value.QC, p.value.QC <= 0.05) -> Underived.set
+
+## working with samples
+MSc_data_samples[complete.cases(MSc_data_samples), ] -> MSc_data_samples_complete ## removing rows with NA
+dim(MSc_data_samples_complete)
+MSc_data_samples_complete 
+as.numeric(MSc_data_samples_complete$Signal.Noise) -> MSc_data_samples_complete$Signal.Noise
+hist(MSc_data_samples_complete$Signal.Noise, breaks =2000, xlim = range(0, 30))
+filter(MSc_data_samples_complete, Signal.Noise >= 10.0) -> MSc_quant ## removing features under treshold
+
+## Calculation average of three replicates for each sample
+SN <- unique(MSc_quant$Sample.Name)
+Name1 <- c("Sample.Name", "Group", "Component.Name", "Calc.Conc", "SD")
+data.frame(matrix(, nrow=0, ncol=5)) -> null_frame
+names(null_frame) <- Name1
+for (i in 1:length(SN)) {
+  filter(MSc_quant, Sample.Name == SN[i]) -> sub_sample 
+  null_mean <- as.numeric()
+  null_sd <- as.numeric()
+  unique(sub_sample$Component.Name) -> vector_component
+  for(j in 1:length(vector_component)) { 
+    c(null_mean, mean(subset(sub_sample, Component.Name == vector_component[j])$Calculated.Concentration)) -> null_mean 
+    c(null_sd, sd(subset(sub_sample, Component.Name == vector_component[j])$Calculated.Concentration)) -> null_sd
+    as.data.frame(cbind(vector_component, null_mean, null_sd)) -> sub_mean 
+  }
+  rep(unique(sub_sample$Sample.Name), length(vector_component)) -> sample_vector
+  rep(unique(sub_sample$Group), length(vector_component)) -> group_vector
+  as.data.frame(cbind(sample_vector, group_vector, sub_mean)) -> mean_data 
+  Name1 -> names(mean_data)
+  rbind(null_frame, mean_data) -> null_frame
+}
+
+as.numeric(as.character(null_frame$Calc.Conc)) -> null_frame$Calc.Conc
+as.numeric(as.character(null_frame$SD)) -> null_frame$SD
+mutate(null_frame, RSD=round(100*SD/Calc.Conc, 2)) -> MSc_data_mean_sd
+hist(MSc_data_mean_sd$RSD, breaks =1000, xlim = range(0, 50), abline(v = 25, col ="red", lwd = 2)) 
+filter(MSc_data_mean_sd, RSD <=25) -> MSc_RSDfiltered
+filter(MSc_data_mean_sd, RSD > 25) -> MSc_RSD_unsorted
+nrow(MSc_RSD_unsorted[-which(MSc_RSD_unsorted$Component.Name %in% c("Aspartic acid", "Glutamic Acid")), ])
+as.character(unique(MSc_RSD_unsorted$Sample.Name)) -> Sample.Name.vector
+data.frame(matrix(, nrow=0, ncol=5)) -> sample_frame
+## this code works only with three replicates (excluding one of three values in three replicates and calculating mean and SD value with two replicates)
+for(i in 1:length(Sample.Name.vector)) {
+  subset(MSc_RSD_unsorted, Sample.Name==Sample.Name.vector[i]) -> sub_MSc_RSD_unsorted
+  subset(MSc_quant, Sample.Name==Sample.Name.vector[i]) -> sub_MSc_quant
+  sub_MSc_quant[which(sub_MSc_quant$Component.Name%in%sub_MSc_RSD_unsorted$Component.Name), ] -> selected_sub_MSc_quant
+  for(j in 1:length(unique(selected_sub_MSc_quant$Component.Name))){
+   selected_sub_MSc_quant[which(selected_sub_MSc_quant$Component.Name==unique(selected_sub_MSc_quant$Component.Name)[j]), ] -> sel_comp_sub_MSc_quant
+   mean(sel_comp_sub_MSc_quant[-which.max(abs(sel_comp_sub_MSc_quant$Calculated.Concentration-median(sel_comp_sub_MSc_quant$Calculated.Concentration))), 11]) -> mean_unsorted
+   sd(sel_comp_sub_MSc_quant[-which.max(abs(sel_comp_sub_MSc_quant$Calculated.Concentration-median(sel_comp_sub_MSc_quant$Calculated.Concentration))), 11]) -> sd_unsorted
+   as.data.frame(cbind(unique(sel_comp_sub_MSc_quant$Sample.Name), unique(sel_comp_sub_MSc_quant$Group), unique(sel_comp_sub_MSc_quant$Component.Name), mean_unsorted, sd_unsorted)) -> sample_unsorted
+   names(sample_unsorted) <- Name1
+   rbind(sample_frame, sample_unsorted) -> sample_frame
+  }
+}
+sample_frame[complete.cases(sample_frame), ] -> mean_sd_two_replicates
+as.numeric(as.character(mean_sd_two_replicates$Calc.Conc)) -> mean_sd_two_replicates$Calc.Conc
+as.numeric(as.character(mean_sd_two_replicates$SD)) -> mean_sd_two_replicates$SD
+mutate(mean_sd_two_replicates, RSD=round(100*SD/Calc.Conc, 2)) -> MSc_data_two_replicates
+subset(MSc_data_two_replicates, RSD <= 25) -> MSc_data_two_replicates_add
+rbind(MSc_RSDfiltered, MSc_data_two_replicates_add) -> MSc_RSDfiltered_rep
+unique(as.character(MSc_RSDfiltered_rep$Component.Name))
+## transposition DF
+as.character(unique(MSc_RSDfiltered_rep$Component.Name)) -> Component
+filter(MSc_RSDfiltered_rep, Component.Name == "Alanine") -> sub_Ala ## it doesn't mean why I choose Ala, just representive metabolite
+Sample.Name <- as.character(sub_Ala$Sample.Name)
+as.character(sub_Ala$Group) -> Group
+as.data.frame(cbind(Group, Sample.Name)) -> zero_frame
+as.character(zero_frame$Group) -> zero_frame$Group
+as.character(MSc_RSDfiltered_rep$Group) -> MSc_RSDfiltered_rep$Group
+##
+for(i in 1:length(Component)) {
+  filter(MSc_RSDfiltered_rep, Component.Name == Component[i]) -> output_comp
+  left_join(zero_frame, output_comp[, c(2, 1, 4)], by = c("Group", "Sample.Name")) -> zero_frame ## building data frame which variables are metabolites
+}
+names(zero_frame) <- c("Group", "Sample.Name", Component)
+write.xlsx(zero_frame, "~/MSc_15_conc.xlsx")
+zero_frame -> result_table_MSc15
+## Combining data and filtering most of NA values
+result_table_MSc15[, -which(colMeans(is.na(result_table_MSc15)) > 0.20)] -> set20
+
+## Data processing for derived protocol
+read.xlsx('~/MSc-16_S2S1_Analytes.xlsx', sheet = 1, startRow=1, colNames = TRUE, rowNames = FALSE, detectDates = FALSE, skipEmptyRows = TRUE,
+          skipEmptyCols = TRUE, rows = NULL, cols = NULL, check.names = FALSE,
+          namedRegion = NULL, na.strings = "NA", fillMergedCells = FALSE) -> MSc16_data
+
+as.numeric(MSc16_data$Area) -> MSc16_data$Area
+as.numeric(MSc16_data$IS.Area) -> MSc16_data$IS.Area
+filter(MSc16_data, IS.Name!="NA") -> MSc16_data2
+subset(MSc16_data2, Group %in% c(1,2)) -> MSc16_data_samples
+subset(MSc16_data2, Group %in% c(3,4)) -> MSc16_data_QC
+
+## working with QC samples
+MSc16_data_QC[-which(MSc16_data_QC$Component.Name%in%c("Isoleucine", "Unknown")), ] -> MSc16_data_QC
+unique(MSc16_data_QC$Sample.Name) -> L1L2_vector_MSc16
+subset(MSc16_data_QC, Sample.Name %in% L1L2_vector_MSc16[c(1,3)]) -> L1_interassay_MSc16
+subset(MSc16_data_QC, Sample.Name %in% L1L2_vector_MSc16[c(2,4)]) -> L2_interassay_MSc16
+L1_interassay_MSc16[complete.cases(L1_interassay_MSc16[ , 13]), ] -> L1_interassay_MSc16
+L2_interassay_MSc16[complete.cases(L2_interassay_MSc16[ , 13]), ] -> L2_interassay_MSc16
+L1_interassay_MSc16[-which(L1_interassay_MSc16$Component.Name =="C18:2OH-Carnitine"), ] -> L1_interassay_MSc16
+L2_interassay_MSc16[-which(L2_interassay_MSc16$Component.Name =="C18:2OH-Carnitine"), ] -> L2_interassay_MSc16
+unique(L1_interassay_MSc16$Component.Name) -> Metabolite_v_MSc16
+unique(L2_interassay_MSc16$Component.Name) -> Metabolite_v_L2_MSc16
+
+## interassay analysis of the variance QC samples
+## L1
+p.value.interassay.MSc16 <- c("Component.Name", "p.value.L1")
+data.frame(matrix(, nrow=0, ncol=2)) -> p.value.metabolites.MSc16
+names(p.value.metabolites.MSc16) <- p.value.interassay.MSc16
+for(i in 1:length(Metabolite_v_MSc16)) {
+  subset(L1_interassay_MSc16, Component.Name == Metabolite_v_MSc16[i]) -> sub_L1_interassay_MSc16 
+  sub_L1_interassay_MSc16[which(sub_L1_interassay_MSc16$Series==1), ] -> ser1_sub_L1_interassay_MSc16
+  sub_L1_interassay_MSc16[which(sub_L1_interassay_MSc16$Series==2), ] -> ser2_sub_L1_interassay_MSc16
+  ser1_sub_L1_interassay_MSc16[-which.max(abs(ser1_sub_L1_interassay_MSc16$Calculated.Concentration-median(ser1_sub_L1_interassay_MSc16$Calculated.Concentration, na.rm = TRUE))), 13] -> two_value_vector_ser1
+  ser2_sub_L1_interassay_MSc16[-which.max(abs(ser2_sub_L1_interassay_MSc16$Calculated.Concentration-median(ser2_sub_L1_interassay_MSc16$Calculated.Concentration, na.rm = TRUE))), 13] -> two_value_vector_ser2
+  t.test(ser1_sub_L1_interassay_MSc16$Calculated.Concentration, ser2_sub_L1_interassay_MSc16$Calculated.Concentration, paired = TRUE, alternative = "two.sided") -> t.test.allvalues
+  t.test(two_value_vector_ser1, ser2_sub_L1_interassay_MSc16$Calculated.Concentration, paired = FALSE, alternative = "two.sided") -> t.test.ser1
+  t.test(two_value_vector_ser2, ser1_sub_L1_interassay_MSc16$Calculated.Concentration, paired = FALSE, alternative = "two.sided") -> t.test.ser2
+  t.test(two_value_vector_ser1, two_value_vector_ser2, paired = TRUE, alternative = "two.sided") -> t.test.ser1.ser2
+  min(t.test.allvalues$p.value, t.test.ser1$p.value, t.test.ser2$p.value, t.test.ser1.ser2$p.value, na.rm = TRUE) -> min.p.value 
+  data.frame(cbind(Metabolite_v_MSc16[i], min.p.value)) -> output.p.value
+  names(output.p.value) <- p.value.interassay.MSc16
+  rbind(p.value.metabolites.MSc16, output.p.value) -> p.value.metabolites.MSc16
+  names(p.value.metabolites.MSc16) <- p.value.interassay.MSc16
+}
+p.value.metabolites.MSc16
+## L2
+p.value.interassay.MSc16 <- c("Component.Name", "p.value.L2")
+data.frame(matrix(, nrow=0, ncol=2)) -> p.value.metabolites.L2.MSc16
+names(p.value.metabolites.MSc16) <- p.value.interassay.MSc16
+for(i in 1:length(Metabolite_v_L2_MSc16)) {
+  subset(L2_interassay_MSc16, Component.Name == Metabolite_v_L2_MSc16[i]) -> sub_L2_interassay_MSc16 
+  sub_L2_interassay_MSc16[which(sub_L1_interassay_MSc16$Series==1), ] -> ser1_sub_L2_interassay_MSc16
+  sub_L2_interassay_MSc16[which(sub_L1_interassay_MSc16$Series==2), ] -> ser2_sub_L2_interassay_MSc16
+  ser1_sub_L2_interassay_MSc16[-which.max(abs(ser1_sub_L2_interassay_MSc16$Calculated.Concentration-median(ser1_sub_L2_interassay_MSc16$Calculated.Concentration, na.rm = TRUE))), 13] -> two_value_vector_ser1
+  ser2_sub_L2_interassay_MSc16[-which.max(abs(ser2_sub_L2_interassay_MSc16$Calculated.Concentration-median(ser2_sub_L2_interassay_MSc16$Calculated.Concentration, na.rm = TRUE))), 13] -> two_value_vector_ser2
+  t.test(ser1_sub_L2_interassay_MSc16$Calculated.Concentration, ser2_sub_L1_interassay_MSc16$Calculated.Concentration, paired = TRUE, alternative = "two.sided") -> t.test.allvalues
+  t.test(two_value_vector_ser1, ser2_sub_L1_interassay_MSc16$Calculated.Concentration, paired = FALSE, alternative = "two.sided") -> t.test.ser1
+  t.test(two_value_vector_ser2, ser1_sub_L1_interassay_MSc16$Calculated.Concentration, paired = FALSE, alternative = "two.sided") -> t.test.ser2
+  t.test(two_value_vector_ser1, two_value_vector_ser2, paired = TRUE, alternative = "two.sided") -> t.test.ser1.ser2
+  min(t.test.allvalues$p.value, t.test.ser1$p.value, t.test.ser2$p.value, t.test.ser1.ser2$p.value, na.rm = TRUE) -> min.p.value 
+  data.frame(cbind(Metabolite_v_L2_MSc16[i], min.p.value)) -> output.p.value
+  names(output.p.value) <- p.value.interassay.MSc16
+  rbind(p.value.metabolites.L2.MSc16, output.p.value) -> p.value.metabolites.L2.MSc16
+  names(p.value.metabolites.L2.MSc16) <- p.value.interassay.MSc16
+}
+p.value.metabolites.L2.MSc16 ## all L2 values under threshold
+## merge L1 L2 p.values and filtering metabolites interassay p < 0.05
+left_join(p.value.metabolites.MSc16, p.value.metabolites.L2.MSc16, by = "Component.Name") -> butylated.QC.MSc16
+apply(butylated.QC.MSc16[, 2:3], 1, min) -> min.p.value
+as.data.frame(cbind(as.character(butylated.QC.MSc16$Component.Name), min.p.value)) -> p.value.QC.MSc16
+names(p.value.QC.MSc16) <- c("Component.Name", "p.value.QC")
+as.numeric(as.character(p.value.QC.MSc16$p.value.QC)) -> p.value.QC.MSc16$p.value.QC
+filter(p.value.QC.MSc16, p.value.QC <= 0.05) -> Butylated.set
+write.xlsx(Butylated.set, "~/Table S2.xlsx")
+## working with samples
+MSc16_data_samples[complete.cases(MSc16_data_samples), ] -> MSc16_data_samples_complete
+dim(MSc16_data_samples_complete)
+as.numeric(MSc16_data_samples_complete$Signal.Noise) -> MSc16_data_samples_complete$Signal.Noise
+hist(MSc16_data_samples_complete$Signal.Noise, breaks =2000, xlim = range(0, 100))
+filter(MSc16_data_samples_complete, Signal.Noise >= 10.0) -> MSc16_quant ## removing features under treshold
+## Calculation average of three replicates for each sample
+SN_MSc16 <- unique(MSc16_quant$Sample.Name)
+Name1_MSc16 <- c("Sample.Name", "Group", "Component.Name", "Calc.Conc", "SD")
+data.frame(matrix(, nrow=0, ncol=5)) -> null_frame_MSc16
+names(null_frame_MSc16) <- Name1_MSc16
+for (i in 1:length(SN_MSc16)) {
+  filter(MSc16_quant, Sample.Name == SN_MSc16[i]) -> sub_sample_MSc16
+  null_mean_MSc16 <- as.numeric()
+  null_sd_MSc16 <- as.numeric()
+  unique(sub_sample_MSc16$Component.Name) -> vector_component_MSc16
+  for(j in 1:length(vector_component_MSc16)) { 
+    c(null_mean_MSc16, mean(subset(sub_sample_MSc16, Component.Name == vector_component_MSc16[j])$Calculated.Concentration)) -> null_mean_MSc16 
+    c(null_sd_MSc16, sd(subset(sub_sample_MSc16, Component.Name == vector_component_MSc16[j])$Calculated.Concentration)) -> null_sd_MSc16
+    as.data.frame(cbind(vector_component_MSc16, null_mean_MSc16, null_sd_MSc16)) -> sub_mean_MSc16
+  }
+  rep(unique(sub_sample_MSc16$Sample.Name), length(vector_component_MSc16)) -> sample_vector_MSc16
+  rep(unique(sub_sample_MSc16$Group), length(vector_component_MSc16)) -> group_vector_MSc16
+  as.data.frame(cbind(sample_vector_MSc16, group_vector_MSc16, sub_mean_MSc16)) -> mean_data_MSc16
+  Name1_MSc16 -> names(mean_data_MSc16)
+  rbind(null_frame_MSc16, mean_data_MSc16) -> null_frame_MSc16
+}
+dim(null_frame_MSc16)
+as.numeric(as.character(null_frame_MSc16$Calc.Conc)) -> null_frame_MSc16$Calc.Conc
+as.numeric(as.character(null_frame_MSc16$SD)) -> null_frame_MSc16$SD
+mutate(null_frame_MSc16, RSD=round(100*SD/Calc.Conc, 2)) -> MSc16_data_mean_sd
+hist(MSc16_data_mean_sd$RSD, breaks =1000, xlim = range(0, 50))
+filter(MSc16_data_mean_sd, RSD <=30) -> MSc16_RSDfiltered
+filter(MSc16_data_mean_sd, RSD > 30) -> MSc16_RSD_unsorted
+as.character(unique(MSc16_RSD_unsorted$Sample.Name)) -> Sample.Name.vector.MSc16
+data.frame(matrix(, nrow=0, ncol=5)) -> sample_frame.MSc16
+## this code works only with three replicates (excluding one of three values in three replicates and calculating mean and SD value with two replicates)
+for(i in 1:length(Sample.Name.vector.MSc16)) {
+  subset(MSc16_RSD_unsorted, Sample.Name==Sample.Name.vector.MSc16[i]) -> sub_MSc16_RSD_unsorted
+  subset(MSc16_quant, Sample.Name==Sample.Name.vector.MSc16[i]) -> sub_MSc16_quant
+  sub_MSc16_quant[which(sub_MSc16_quant$Component.Name%in%sub_MSc16_RSD_unsorted$Component.Name), ] -> selected_sub_MSc16_quant
+  for(j in 1:length(unique(selected_sub_MSc16_quant$Component.Name))){
+    selected_sub_MSc16_quant[which(selected_sub_MSc16_quant$Component.Name==unique(selected_sub_MSc16_quant$Component.Name)[j]), ] -> sel_comp_sub_MSc16_quant
+    mean(sel_comp_sub_MSc16_quant[-which.max(abs(sel_comp_sub_MSc16_quant$Calculated.Concentration-median(sel_comp_sub_MSc16_quant$Calculated.Concentration))), 13]) -> mean_unsorted.MSc16
+    sd(sel_comp_sub_MSc16_quant[-which.max(abs(sel_comp_sub_MSc16_quant$Calculated.Concentration-median(sel_comp_sub_MSc16_quant$Calculated.Concentration))), 13]) -> sd_unsorted.MSc16
+    as.data.frame(cbind(unique(sel_comp_sub_MSc16_quant$Sample.Name), unique(sel_comp_sub_MSc16_quant$Group), unique(sel_comp_sub_MSc16_quant$Component.Name), mean_unsorted.MSc16, sd_unsorted.MSc16)) -> sample_unsorted.MSc16
+    names(sample_unsorted.MSc16) <- Name1_MSc16
+    rbind(sample_frame.MSc16, sample_unsorted.MSc16) -> sample_frame.MSc16
+  }
+}
+sample_frame.MSc16[complete.cases(sample_frame.MSc16), ] -> mean_sd_two_replicates.MSc16
+as.numeric(as.character(mean_sd_two_replicates.MSc16$Calc.Conc)) -> mean_sd_two_replicates.MSc16$Calc.Conc
+as.numeric(as.character(mean_sd_two_replicates.MSc16$SD)) -> mean_sd_two_replicates.MSc16$SD
+mutate(mean_sd_two_replicates.MSc16, RSD=round(100*SD/Calc.Conc, 2)) -> MSc16_data_two_replicates
+hist(MSc16_data_two_replicates$RSD, breaks =100, xlim = range(0, 50))
+subset(MSc16_data_two_replicates, RSD <= 30) -> MSc16_data_two_replicates_add
+rbind(MSc16_RSDfiltered, MSc16_data_two_replicates_add) -> MSc16_RSDfiltered_rep
+unique(as.character(MSc16_RSDfiltered_rep$Component.Name))
+## transposition DF
+as.character(unique(MSc16_RSDfiltered_rep$Component.Name)) -> Component_MSc16
+filter(MSc16_RSDfiltered_rep, Component.Name == "Glutamic Acid") -> sub_MSc16_Glu ## this metabolite is measured in all samples
+Sample.Name <- as.character(sub_MSc16_Glu$Sample.Name)
+as.character(sub_MSc16_Glu$Group) -> Group
+as.data.frame(cbind(Sample.Name, Group)) -> zero_frame_MSc16
+as.character(zero_frame_MSc16$Group) -> zero_frame_MSc16$Group
+as.character(MSc16_RSDfiltered_rep$Group) -> MSc16_RSDfiltered_rep$Group
+##
+for(i in 1:length(Component_MSc16)) {
+  filter(MSc16_RSDfiltered_rep, Component.Name == Component_MSc16[i]) -> output_comp_MSc16
+  left_join(zero_frame_MSc16, output_comp_MSc16[, c(2, 1, 4)], by = c("Sample.Name", "Group")) -> zero_frame_MSc16 ## building data frame which variables are metabolites
+}
+names(zero_frame_MSc16) <- c("Sample.Name", "Group", Component_MSc16)
+write.xlsx(zero_frame_MSc16, "~/MSc_16_conc.xlsx")
+zero_frame_MSc16[, -which(colMeans(is.na(zero_frame_MSc16)) > 0.20)] -> set20_MSc16
+## the same data frame as set20 from method with derivatization
+arrange(set20, Sample.Name) -> set20
+arrange(set20_MSc16, Sample.Name) -> set20_MSc16
+set20[, which(colMeans(is.na(set20)) == 0)] -> complete_underived
+set20_MSc16[, which(colMeans(is.na(set20_MSc16)) == 0)] -> complete_derived
+complete_underived[, -which(colnames(complete_underived) %in% colnames(complete_derived))] -> underived_add_complete_data
+underived_add_complete_data[, -which(colnames(underived_add_complete_data) %in% c("Arginine", "C3DC-Carnitine"))] ->  underived_add_complete_data ## excluding Arg and C3DC-carnitine from underived data (p>0.05 according to QC samples)
+cbind(complete_derived, underived_add_complete_data) -> united_complete_data
+dim(united_complete_data)
+set20[ , which(colMeans(is.na(set20)) > 0)] -> recovered_set20
+set20_MSc16[ , which(colMeans(is.na(set20_MSc16)) > 0)] -> recovered_set20_MSc16
+recovered_set20[, -which(colnames(recovered_set20) %in% colnames(united_complete_data))] -> recovered_set20
+recovered_set20[, -which(colnames(recovered_set20) %in% colnames(recovered_set20_MSc16))] -> add_set20 ## no column were transfered from underived data set
+recovered_set20_MSc16[, -which(colnames(recovered_set20_MSc16) %in% colnames(united_complete_data))] -> recovered_set20_MSc16
+cbind(united_complete_data, recovered_set20_MSc16) -> filtered_data1
+filtered_data1
+# Variant 2 mean value replacement for each group
+filtered_data1 -> Mean_filtered
+Meanf=function(x){
+  x<-as.numeric(as.character(x)) #first convert each column into numeric from factor
+  x[is.na(x)] =mean(x, na.rm=TRUE) #convert the item with NA to mean value from the column
+  x #display the column
+}
+as.factor(Mean_filtered$Group) -> Mean_filtered$Group
+subset(Mean_filtered, Group==1) -> sub_mean1_alldata
+subset(Mean_filtered, Group==2) -> sub_mean2_alldata
+clean_df1_alldata=data.frame(apply(sub_mean1_alldata, 2, Meanf))
+sub_mean1_alldata$Sample.Name -> clean_df1_alldata$Sample.Name
+clean_df2_alldata=data.frame(apply(sub_mean2_alldata, 2, Meanf))
+sub_mean2_alldata$Sample.Name -> clean_df2_alldata$Sample.Name
+rbind(clean_df1_alldata, clean_df2_alldata) -> filtered_MSc_v2
+names(filtered_MSc_v2) <- names(sub_mean1_alldata)
+## Mann-Whitney U test for determination of meaningful differentiated variables
+as.factor(filtered_MSc_v2$Group) -> filtered_MSc_v2$Group
+Wcox <-function(x) {
+  wilcox.test(x~Group, data =filtered_MSc_v2)
+}
+apply(filtered_MSc_v2[, -1:-2], 2, Wcox) -> Wcox_result_v2
+as.data.frame(t(sapply(Wcox_result_v2, '[', c("statistic","p.value")))) -> Wcox_stat_v2
+rownames(Wcox_stat_v2) <- names(filtered_MSc_v2[, -1:-2])
+rownames(Wcox_stat_v2) -> Comp.Name
+cbind(Comp.Name, Wcox_stat_v2) -> Wcox_final_v2
+as.numeric(Wcox_final_v2$statistic) -> Wcox_final_v2$statistic
+as.numeric(Wcox_final_v2$p.value) -> Wcox_final_v2$p.value
+arrange(Wcox_final_v2, p.value) -> Wcox_final_v2
+write.xlsx(Wcox_final_v2, "~/Wcox_final_v2.xlsx")
+## plotting potential markers
+as.character(filtered_MSc_v2$Group)-> filtered_MSc_v2$Group
+filtered_MSc_v2$Group[filtered_MSc_v2$Group == "1"] <- "Control"
+filtered_MSc_v2$Group[filtered_MSc_v2$Group == "2"] <- "Multiple.Sclerosis"
+subset(filtered_MSc_v2, Group == "Control") -> control_df_v2
+subset(filtered_MSc_v2, Group == "Multiple.Sclerosis") -> MSc_df_v2
+as.factor(filtered_MSc_v2$Group)-> filtered_MSc_v2$Group
+for(i in 3:length(colnames(filtered_MSc_v2))) {
+  pdf(paste("./",colnames(filtered_MSc_v2)[i],".pdf"))
+  boxplot(filtered_MSc_v2[, i]~Group, filtered_MSc_v2, main = paste(colnames(filtered_MSc_v2)[i],"distribution in two groups"), xlab = "Groups", ylab = paste(colnames(filtered_MSc_v2)[i],"Conc, umol/L"))
+  dev.off()
+}
+summary(control_df_v2)
+summary(MSc_df_v2)
+cbind(filtered_MSc_v2[, 1:2], filtered_MSc_v2[, which(colnames(filtered_MSc_v2) %in% filter(Wcox_final_v2, p.value <= 0.05)[, 1])]) -> selected_markers_v2
+Glu.stat <- desc_statby(selected_markers_v2, measure.var = "Glutamic Acid",
+                        grps = "Group")
+Glu.stat <- Glu.stat[, c("Group", "mean", "sd")]
+
+C10.1.stat <- desc_statby(selected_markers_v2, measure.var = "C10:1-Carnitine",
+                         grps = "Group")
+C10.1.stat <- C10.1.stat[, c("Group", "mean", "sd")]
+Val.stat <- desc_statby(selected_markers_v2, measure.var = "Valine",
+                          grps = "Group")
+Val.stat <- Val.stat[, c("Group", "mean", "sd")]
+Leu.stat <- desc_statby(selected_markers_v2, measure.var = "Leucine",
+                        grps = "Group")
+Leu.stat <- Leu.stat[, c("Group", "mean", "sd")]
+c("Glutamic Acid", "Glutamic Acid", "C10:1-Carnitine", "C10:1-Carnitine", "Valine", "Valine", "Leucine", "Leucine" ) -> Metabolite
+cbind(Metabolite, rbind(Glu.stat, C10.1.stat, Val.stat, Leu.stat)) -> Metb.stat
+round(Metb.stat$mean, 4) -> Metb.stat$mean
+round(Metb.stat$sd, 4) -> Metb.stat$sd
+as.character(selected_markers_v2$Group) -> selected_markers_v2$Group
+selected_markers_v2$Group[selected_markers_v2$Group == "Control"] <- "Control"
+selected_markers_v2$Group[selected_markers_v2$Group == "Multiple.Sclerosis"] <- "RRMS"
+as.factor(selected_markers_v2$Group) -> selected_markers_v2$Group
+pdf("figure2.pdf", width = 14, height = 14)
+ggplot(selected_markers_v2, aes(x=Group, y=`Glutamic Acid`, fill=Group)) + scale_fill_manual(values=c("#fecc5c", "#bd0026")) + theme_light() + ylab(paste("Glutamic Acid, umol/L")) + xlab(NULL) +
+  guides(fill=F) + theme(axis.text.x=element_text(size = 14, face = "bold"), axis.text.y=element_text(size=14), axis.title = element_text(size = 18), text = element_text(size = 12), line = element_line(size=1)) +
+  stat_summary(fun.data = quantiles_95, geom="boxplot") + theme(plot.margin=unit(c(1,1,1.5,0.7),"cm"), aspect.ratio = 2) +
+  scale_x_discrete(labels=c("Control" = "Control", "RRMS" = "RRMS")) +
+  annotate("text", x=0.72, y=140, colour = "black", label=paste("A"), size = 15) -> Glu.plot
+ggplot(selected_markers_v2, aes(x=Group, y=`C10:1-Carnitine`, fill=Group)) + scale_fill_manual(values=c("#fecc5c", "#bd0026")) + theme_light() + ylab(paste("C10:1-carnitine, umol/L")) + xlab(NULL) +
+  guides(fill=F) + theme(axis.text.x=element_text(size = 14, face = "bold"), axis.text.y=element_text(size=14), axis.title = element_text(size = 18), text = element_text(size = 12), line = element_line(size=1)) +
+  stat_summary(fun.data = quantiles_95, geom="boxplot") + theme(plot.margin=unit(c(1,1,1.5,0.7),"cm"), aspect.ratio = 2) +
+  scale_x_discrete(labels=c("Control" = "Control", "RRMS" = "RRMS")) +
+  annotate("text", x=0.72, y=0.105, colour = "black", label=paste("B"), size = 15) -> C10.1.plot
+ggplot(selected_markers_v2, aes(x=Group, y=Valine, fill=Group)) + scale_fill_manual(values=c("#fecc5c", "#bd0026")) + theme_light() + ylab(paste("Valine, umol/L")) + xlab(NULL) +
+  guides(fill=F) + theme(axis.text.x=element_text(size = 14, face = "bold"), axis.text.y=element_text(size=14), axis.title = element_text(size = 18), text = element_text(size = 12), line = element_line(size=1)) +
+  stat_summary(fun.data = quantiles_95, geom="boxplot") + theme(plot.margin=unit(c(1,1,1.5,0.7),"cm"), aspect.ratio = 2) +
+  scale_x_discrete(labels=c("Control" = "Control", "RRMS" = "RRMS")) +
+  annotate("text", x=0.72, y=110, colour = "black", label=paste("C"), size = 15) -> Val.plot
+ggplot(selected_markers_v2, aes(x=Group, y=Leucine, fill=Group)) + scale_fill_manual(values=c("#fecc5c", "#bd0026")) + theme_light() + ylab(paste("Leu+Ile, umol/L")) + xlab(NULL) +
+  guides(fill=F) + theme(axis.text.x=element_text(size = 14, face = "bold"), axis.text.y=element_text(size=14), axis.title = element_text(size = 18), text = element_text(size = 12), line = element_line(size=1)) +
+  stat_summary(fun.data = quantiles_95, geom="boxplot") + theme(plot.margin=unit(c(1,1,1.5,0.7),"cm"), aspect.ratio = 2) +
+  scale_x_discrete(labels=c("Control" = "Control", "RRMS" = "RRMS")) +
+  annotate("text", x=0.72, y=109, colour = "black", label=paste("D"), size = 15) -> Leu.plot
+
+grid.arrange(Glu.plot, C10.1.plot, Val.plot, Leu.plot, nrow = 2, 
+             top = text_grob("Metabolites concentration in groups", color = "black", face = "bold", size = 20)) -> marker_plot
+marker_plot
+dev.off()
+
+## unsupervised analysis PCA
+normalize <- function(x) {
+  return ((x - min(x)) / (max(x) - min(x)))
+}
+dfNorm2 <- as.data.frame(lapply(filtered_MSc_v2[3:ncol(filtered_MSc_v2)], normalize))
+names(dfNorm2) <- names(filtered_MSc_v2[3:ncol(filtered_MSc_v2)])
+cbind(filtered_MSc_v2[, 1:2], dfNorm2) -> scaled_MSc_2
+scaled_MSc_2$Group <- as.character(scaled_MSc_2$Group)
+scaled_MSc_2$Group[scaled_MSc_2$Group == "1"] <- "Control"
+scaled_MSc_2$Group[scaled_MSc_2$Group == "2"] <- "Multiple.Sclerosis"
+df_MSc_pca <- prcomp(scaled_MSc_2[, -1:-2], center = T) ## pca only for two groups: MSc and Control
+groups <- as.factor(scaled_MSc_2$Group)
+pdf("Eigenvalue_disrib_MSc.pdf")
+fviz_eig(df_MSc_pca, addlabels = TRUE, ylim = c(0, 35), barcolor = "#fecc5c", barfill = "#fecc5c") + theme(text = element_text(size = 20), ) -> contrib1_MSc
+ggpar(contrib1_MSc, title = "Eigenvalue distribution") -> contrib1_MSc
+contrib1_MSc
+dev.off()
+## Supervised analysis
+## Split dataset into validation and training sets (3:1)
+filtered_data1 -> filtered_data
+set.seed(438)
+sample(filtered_data$Sample.Name) -> ordering_vector
+filtered_data[match(ordering_vector, filtered_data$Sample.Name), ] -> filtered_data ## reordering dataset accoeding to random sampling vector
+trainIndex <- createDataPartition(filtered_data$Group, p=.75, list = F)
+training_set_MSc <- filtered_data[trainIndex,]
+validation_set_MSc <- filtered_data[-trainIndex,]
+## NA Values replacement in both datasets, mean replacement
+## Repalcing missing values with mean value for each group calculated separately in training set and calculated for all observations in validation set
+validation_MSc_v2=data.frame(apply(validation_set_MSc[, -1:-2], 2, Meanf)) ## relpacing NA values in validation dataset
+names(validation_MSc_v2) <- names(validation_set_MSc[, -1:-2])
+cbind(validation_set_MSc$Sample.Name, validation_set_MSc$Group, validation_MSc_v2) -> validation_MSc_v2
+names(validation_MSc_v2) <- names(validation_set_MSc)
+as.factor(training_set_MSc$Group) -> training_set_MSc$Group
+subset(training_set_MSc, Group==1) -> sub_mean1
+subset(training_set_MSc, Group==2) -> sub_mean2
+clean_df1=data.frame(apply(sub_mean1, 2, Meanf))
+sub_mean1$Sample.Name -> clean_df1$Sample.Name
+clean_df2=data.frame(apply(sub_mean2, 2, Meanf))
+sub_mean2$Sample.Name -> clean_df2$Sample.Name
+rbind(clean_df1, clean_df2) -> training_MSc_v2
+names(training_MSc_v2) <- names(sub_mean1)
+training_MSc_v2$Group <- as.character(training_MSc_v2$Group)
+training_MSc_v2$Group[training_MSc_v2$Group == "1"] <- "Control"
+training_MSc_v2$Group[training_MSc_v2$Group == "2"] <- "RRMS"
+as.factor(training_MSc_v2$Group) -> training_MSc_v2$Group
+validation_MSc_v2$Group <- as.character(validation_MSc_v2$Group)
+validation_MSc_v2$Group[validation_MSc_v2$Group == "1"] <- "Control"
+validation_MSc_v2$Group[validation_MSc_v2$Group == "2"] <- "RRMS"
+## Scaling variables
+## training set
+dfNorm_training_v2 <- as.data.frame(lapply(training_MSc_v2[3:ncol(training_MSc_v2)], normalize))
+names(dfNorm_training_v2) <- names(training_MSc_v2[3:ncol(training_MSc_v2)])
+cbind(training_MSc_v2[, 1:2], dfNorm_training_v2) -> training_scaled_MSc_v2
+## validation set
+dfNorm_validation_v2 <- as.data.frame(lapply(validation_MSc_v2[3:ncol(validation_MSc_v2)], normalize))
+names(dfNorm_validation_v2) <- names(validation_MSc_v2[3:ncol(validation_MSc_v2)])
+cbind(validation_MSc_v2[, 1:2], dfNorm_validation_v2) -> validation_scaled_MSc_v2
+
+## Testing diagnostic power of the models on validation dataset
+######################### Selecting marker panel for diagnostic model building
+colnames(selected_markers_v2)[3:length(colnames(selected_markers_v2))] -> variablesROC
+training_MSc_v2 -> glm_training
+names(training_MSc_v2)
+names(glm_training) <- c("Sample.Name",       "Group",             "Alanine",          "Aspartic.acid",   
+                          "Carnitine",         "C16.Carnitine",     "C2.Carnitine",      "C3.Carnitine",     
+                          "C4.Carnitine",      "C5.Carnitine",      "C5DC.Carnitine",    "Citrulline",       
+                          "Glutamic.Acid",     "Glycine",          "Methionine",       "Ornithine",       
+                          "Phenylalanine",     "Tyrosine",          "Valine",            "Leucine",          
+                          "C6.Carnitine",      "C10.Carnitine",     "C18.Carnitine",     "C5OH.Carnitine",  
+                          "C18.1.Carnitine",   "C14.1.Carnitine",   "C10.1.Carnitine",   "C16.1.Carnitine",  
+                          "C18OH.Carnitine",   "Proline",           "C4DC.Carnitine",    "C8.Carnitine",     
+                          "C12.Carnitine",     "C14.Carnitine",     "Arginine",          "C16OH.Carnitine", 
+                          "C4OH.Carnitine",    "C8.1.Carnitine",    "C14.2.Carnitine",   "C18.2OH.Carnitine",
+                          "C3DC.Carnitine")
+validation_MSc_v2 -> glm_valid
+names(glm_valid) <- c("Sample.Name",       "Group",             "Alanine",          "Aspartic.acid",   
+                         "Carnitine",         "C16.Carnitine",     "C2.Carnitine",      "C3.Carnitine",     
+                         "C4.Carnitine",      "C5.Carnitine",      "C5DC.Carnitine",    "Citrulline",       
+                         "Glutamic.Acid",     "Glycine",          "Methionine",       "Ornithine",       
+                         "Phenylalanine",     "Tyrosine",          "Valine",            "Leucine",          
+                         "C6.Carnitine",      "C10.Carnitine",     "C18.Carnitine",     "C5OH.Carnitine",  
+                         "C18.1.Carnitine",   "C14.1.Carnitine",   "C10.1.Carnitine",   "C16.1.Carnitine",  
+                         "C18OH.Carnitine",   "Proline",           "C4DC.Carnitine",    "C8.Carnitine",     
+                         "C12.Carnitine",     "C14.Carnitine",     "Arginine",          "C16OH.Carnitine", 
+                         "C4OH.Carnitine",    "C8.1.Carnitine",    "C14.2.Carnitine",   "C18.2OH.Carnitine",
+                         "C3DC.Carnitine")
+set.seed(528)
+mod1 <- train(Group ~ Leucine + Glutamic.Acid + C10.1.Carnitine + Valine, data=glm_training, method = "glm",
+                      trControl = trainControl(method="repeatedcv", number = 5, repeats = 20, summaryFunction=twoClassSummary, savePredictions = TRUE, classProbs = TRUE))
+## ROC plotting cross validation:
+Modeltype_glm <- factor(rep("GLM", nrow(mod1$pred)))
+cbind(mod1$pred, Modeltype_glm) -> GLM.MSc.unsc
+GLM.MSc.unsc[, which(colnames(GLM.MSc.unsc)!=c("rowIndex", "parameter"))] -> GLM.MSc.unsc
+## validation glm model on testing set
+as.data.frame(predict(mod1, glm_valid[, -1:-2], type = "prob")) -> predicted_glm.un
+predict(mod1, glm_valid[, -1:-2], type = "raw") -> predicted_glm_class.un
+rep("GLM", length(predicted_glm_class.un)) -> Modeltype.validation.glm.un
+cbind(glm_valid$Group, predicted_glm_class.un, predicted_glm.un, Modeltype.validation.glm.un) -> GLM_validation.un
+names(GLM_validation.un) <- c("obs", "pred", "Control", "RRMS", "Modeltype")
+confusionMatrix(GLM_validation.un$obs, GLM_validation.un$pred, positive="RRMS") -> GLM_confmatrix.un
+GLM_validation.un
+## univariate models
+mod_Leu <- train(Group ~ Leucine, data=glm_training, method = "glm",
+              trControl = trainControl(method="repeatedcv", number = 5, repeats = 20, summaryFunction=twoClassSummary, savePredictions = TRUE, classProbs = TRUE))
+Modeltype_Leu <- factor(rep("Leu", nrow(mod_Leu$pred)))
+cbind(mod_Leu$pred, Modeltype_Leu) -> Leu.MSc
+Leu.MSc[, which(colnames(Leu.MSc)!=c("rowIndex", "parameter"))] -> Leu.MSc
+
+mod_Glu <- train(Group ~ Glutamic.Acid, data=glm_training, method = "glm",
+                 trControl = trainControl(method="repeatedcv", number = 5, repeats = 20, summaryFunction=twoClassSummary, savePredictions = TRUE, classProbs = TRUE))
+Modeltype_Glu <- factor(rep("Glu", nrow(mod_Glu$pred)))
+cbind(mod_Glu$pred, Modeltype_Glu) -> Glu.MSc
+Glu.MSc[, which(colnames(Glu.MSc)!=c("rowIndex", "parameter"))] -> Glu.MSc
+
+mod_C10 <- train(Group ~ C10.1.Carnitine, data=glm_training, method = "glm",
+                 trControl = trainControl(method="repeatedcv", number = 5, repeats = 20, summaryFunction=twoClassSummary, savePredictions = TRUE, classProbs = TRUE))
+Modeltype_C10 <- factor(rep("C10:1-Carnitine", nrow(mod_C10$pred)))
+cbind(mod_C10$pred, Modeltype_C10) -> C10.MSc
+C10.MSc[, which(colnames(C10.MSc)!=c("rowIndex", "parameter"))] -> C10.MSc
+
+mod_Val <- train(Group ~ Valine, data=glm_training, method = "glm",
+                 trControl = trainControl(method="repeatedcv", number = 5, repeats = 20, summaryFunction=twoClassSummary, savePredictions = TRUE, classProbs = TRUE))
+Modeltype_Val <- factor(rep("Val", nrow(mod_Val$pred)))
+cbind(mod_Val$pred, Modeltype_Val) -> Val.MSc
+Val.MSc[, which(colnames(Val.MSc)!=c("rowIndex", "parameter"))] -> Val.MSc
+colnames(GLM.MSc.unsc)[6] <- "Modeltype"
+colnames(Leu.MSc)[6] <- "Modeltype"
+colnames(Glu.MSc)[6] <- "Modeltype"
+colnames(C10.MSc)[6] <- "Modeltype"
+colnames(Val.MSc)[6] <- "Modeltype"
+rbind(GLM.MSc.unsc[, -5], Leu.MSc[, -5], Glu.MSc[, -5], C10.MSc[, -5], Val.MSc[, -5]) -> MSc_ROC_univ
+factor(MSc_ROC_univ$obs) -> MSc_ROC_univ$obs
+as.numeric(MSc_ROC_univ$Control)  -> MSc_ROC_univ$Control
+as.numeric(MSc_ROC_univ$RRMS) -> MSc_ROC_univ$RRMS
+pdf("ROC_Univ.pdf")
+ggplot(MSc_ROC_univ, aes(m=RRMS, d=obs, colour = Modeltype)) + geom_roc(aes(linetype = Modeltype), n.cuts = 0) +
+  scale_linetype_manual(values = c("solid", "longdash", "dotdash",  "solid", "dashed")) +
+  coord_equal() + style_roc(xlab = "False positive fraction (1 - specificity)", ylab = "True positive fraction (sensitivity)") +
+  labs(title = "Cross validation on training set", subtitle = "Univariate models and GLM model comparison") + color_palette(palette = c("#1905eb", "#0f6627", "#e78118", "#ff0a11", "#0a0002")) + 
+  theme(axis.text.x=element_text(angle = -45, hjust = 0), axis.text = element_text(size=rel(1.1)), axis.title = element_text(size=rel(1.3)), 
+        legend.text = element_text(size = rel(1.0)), legend.title = element_text(size = rel(1.0)), plot.title = element_text(face = "bold", 
+                                                                                                                             hjust = 0.7, size = 14), plot.subtitle = element_text(size = 14)) -> ROC2.univ
+ROC2.univ + annotate("text", x=0.70, y=0.45, colour = "#1905eb", label=paste("GLM, AUC =", round((calc_auc(ROC2.univ))$AUC[1], 3))) + 
+  annotate("text", x=0.70, y=0.375, colour = "#0f6627", label=paste("Leu, AUC =", round((calc_auc(ROC2.univ))$AUC[2], 3))) +
+  annotate("text", x=0.70, y=0.3, colour = "#e78118", label=paste("Glu, AUC =", round((calc_auc(ROC2.univ))$AUC[3], 3))) +
+  annotate("text", x=0.70, y=0.225, colour = "#ff0a11", label=paste("C10.MSc, AUC =", round((calc_auc(ROC2.univ))$AUC[4], 3))) +
+  annotate("text", x=0.70, y=0.150, colour = "#0a0002", label=paste("Val, AUC =", round((calc_auc(ROC2.univ))$AUC[5], 3)))-> ROC2.univ
+ROC2.univ
+dev.off()
+ci.cvAUC(GLM.MSc.unsc$RRMS, GLM.MSc.unsc$obs, label.ordering = NULL, folds = NULL, confidence = 0.95) -> AUC_GLM
+ci.cvAUC(Glu.MSc$RRMS, Glu.MSc$obs, label.ordering = NULL, folds = NULL, confidence = 0.95) -> AUC_Glu
+ci.cvAUC(Leu.MSc$RRMS, Leu.MSc$obs, label.ordering = NULL, folds = NULL, confidence = 0.95) -> AUC_Leu
+ci.cvAUC(C10.MSc$RRMS, C10.MSc$obs, label.ordering = NULL, folds = NULL, confidence = 0.95) -> AUC_C10
+ci.cvAUC(Val.MSc$RRMS, Val.MSc$obs, label.ordering = NULL, folds = NULL, confidence = 0.95) -> AUC_Val
+c(AUC_GLM$cvAUC[1], AUC_Glu$cvAUC[1], AUC_Leu$cvAUC[1], AUC_C10$cvAUC[1], AUC_Val$cvAUC[1]) -> AreaUC
+c(AUC_GLM$ci[1], AUC_Glu$ci[1], AUC_Leu$ci[1], AUC_C10$ci[1], AUC_Val$ci[1]) -> AreaUC.lower
+c(AUC_GLM$ci[2], AUC_Glu$ci[2], AUC_Leu$ci[2], AUC_C10$ci[2], AUC_Val$ci[2]) -> AreaUC.upper
+Marker <- c("GLM all markers", "Glutamate", "Leu and Ile", "C10:1-Carnitine", "Valine")
+as.data.frame(cbind(Marker, AreaUC, AreaUC.lower, AreaUC.upper)) -> univ.model.AUC
+write.xlsx(univ.model.AUC, "~/table3.xlsx")
+## preselected markers datasets
+training_MSc_v2[, which(colnames(training_MSc_v2) %in% colnames(selected_markers_v2))] -> training_MSc_v2_selected
+validation_MSc_v2[, which(colnames(validation_MSc_v2) %in% colnames(selected_markers_v2))] -> validation_MSc_v2_selected
+
+training_scaled_MSc_v2 -> scaled_MSc_C_sup 
+ctrl <- trainControl(method = "repeatedcv",
+                     repeats = 20,
+                     number = 5,
+                     summaryFunction=twoClassSummary, classProbs=TRUE, savePredictions = TRUE)
+plsFit <- train(Group ~ .,
+                  data = scaled_MSc_C_sup[, -1],
+                  method = "pls",
+                  tuneLength = 2,
+                  trControl = ctrl,
+                  preProc = c("center", "scale"))
+plsFit$pred[which(plsFit$pred$ncomp == 2), ] -> ncomp2_PLS
+rep("PLS-DA", nrow(ncomp2_PLS)) -> Modeltype.PLS.CV
+ncomp2_PLS[, which(colnames(ncomp2_PLS) %in% c("pred", "obs", "Control", "RRMS"))] -> ncomp2_PLS
+cbind(ncomp2_PLS, Modeltype.PLS.CV) -> PLS.caret.cv
+confusionMatrix(PLS.caret.cv$obs, PLS.caret.cv$pred, positive="RRMS")
+## testing model on validation dataset
+as.data.frame(predict(plsFit, newdata = validation_scaled_MSc_v2[, -1:-2], ncomp = 2, type = "prob")) -> predicted_pls
+as.character(predict(plsFit, newdata = validation_scaled_MSc_v2[, -1:-2], ncomp = 2, type = "raw")) -> predicted_pls_class
+rep("PLS-DA", length(predicted_pls_class)) -> Modeltype.validation.pls
+cbind(validation_scaled_MSc_v2$Group,predicted_pls_class, predicted_pls, Modeltype.validation.pls) -> PLS_validation
+names(PLS_validation) <- c("obs", "pred", "Control", "RRMS", "Modeltype")
+PLS_validation
+confusionMatrix(PLS_validation$obs, PLS_validation$pred, positive="RRMS") -> PLS_confmatrix
+PLS_confmatrix
+## PLSDA for graph
+plsda(scaled_MSc_C_sup[, -1:-2], scaled_MSc_C_sup[, 2], ncomp = 2, trControl = trainControl(method="repeatedcv", number = 5, repeats = 20, summaryFunction=twoClassSummary, classProbs=T)) -> plsda.df.MSc2
+as.data.frame(predict(plsda.df.MSc2, newdata = scaled_MSc_C_sup[, -1:-2], ncomp = 2, type = "prob", trControl=ctrl)) -> plsda_MSc_class1
+as.character(predict(plsda.df.MSc2, newdata = scaled_MSc_C_sup[, -1:-2], ncomp = 2, type = "class", trControl=ctrl)) -> plsda_data_MSc1
+rep("PLSDA", length(plsda_data_MSc1)) -> Modeltype.training.plsda
+cbind(scaled_MSc_C_sup$Group, plsda_data_MSc1, plsda_MSc_class1, Modeltype.training.plsda) -> PLSDA_CV
+names(PLSDA_CV) <- c("obs", "pred", "Control", "RRMS", "Modeltype")
+confusionMatrix(PLSDA_CV$obs, PLSDA_CV$pred, positive="RRMS")
+## ggplot supervised analysis [PLSDA]
+as.numeric(plsda.df.MSc2$scores[(1:34)]) -> Comp1
+as.numeric(plsda.df.MSc2$scores[(35:68)]) -> Comp2
+scaled_MSc_C_sup$Group -> Group
+as.data.frame(cbind(Comp1, Comp2, Group)) -> plot_PLSda
+plot_PLSda$Group <- as.character(plot_PLSda$Group)
+plot_PLSda$Group[plot_PLSda$Group == "1"] <- "Control"
+plot_PLSda$Group[plot_PLSda$Group == "2"] <- "RRMS"
+factor(plot_PLSda$Group) -> Group
+prob.plsda <- plsda.df.MSc$Xvar^2/sum(plsda.df.MSc$Xvar^2)
+scale(as.numeric(plot_PLSda$Comp1)) -> plot_PLSda$Comp1
+scale(as.numeric(plot_PLSda$Comp2)) -> plot_PLSda$Comp2
+pdf("PLS-da_MSc1.pdf")
+p2 <- ggplot(plot_PLSda, aes(Comp1, Comp2, colour = Group)) + geom_point(size = 3) + 
+  labs(x = paste("Comp1 (", percent(prob.plsda[1]), ")", sep=""), y = paste("Comp2 (", percent(prob.plsda[2]), ")", sep="")) +
+  scale_color_manual(values=c("#ff8100", "#bd0026")) + ggtitle("PLS-DA of individuals by groups")  + theme_light() +
+  stat_ellipse(mapping = NULL, data = NULL, geom = "path", position = "identity", type = "t", level = 0.95, segments = 51)
+p2 + theme(text = element_text(size = 16)) -> p2
+p2
+dev.off()
+
+## PCA-LDA supervised analysis
+## PCA preprocessing and selecting number of components
+training_scaled_MSc_v2 -> scaled_MSc_C_sup
+df_MSc_sup_pca <- prcomp(scaled_MSc_C_sup[, -1:-2], center = T) ## pca only for two groups: MSc and Control
+groups <- as.factor(scaled_MSc_C_sup$Group)
+post.pca.MSc <- df_MSc_sup_pca$x[, 1:8] ## number of components to use were determined in unsupervised analysis
+Group1 <- as.character(scaled_MSc_C_sup$Group)
+Group1[Group1 == "Control"] <- "1"
+Group1[Group1 == "Multiple.Sclerosis"] <- "2"
+as.data.frame(cbind(post.pca.MSc, Group)) -> post.pca.MSc
+as.factor(post.pca.MSc$Group) -> post.pca.MSc$Group
+lda(Group ~ ., data = post.pca.MSc, CV = T) -> MSc.pca.lda
+prop.MSc.lda <- MSc.pca.lda$svd^2/sum(MSc.pca.lda$svd^2)
+as.factor(post.pca.MSc$Group) -> post.pca.MSc$Group
+tab <- table(post.pca.MSc$Group, MSc.pca.lda$class)
+dimnames(tab) <- list(Actual = c("Control", "MS"), "Predicted (cv)" = c("Control","MS"))
+conCV1 <- rbind(tab[1, ]/sum(tab[1, ]), tab[2, ]/sum(tab[2, ]))
+rownames(conCV1) <- c(Actual = c("Control", "MS"))
+print(round(conCV1, 4))
+
+## Plotting pca-lda separation between two groups
+lda(Group ~ ., data = post.pca.MSc, CV = FALSE) -> MSc.pca.lda
+plda_MSc <- predict(object = MSc.pca.lda, newdata = post.pca.MSc)
+lda_MSc_plot <- data.frame(Group = post.pca.MSc$Group, plda_MSc$x)
+lda_MSc_plot$Group <- as.character(lda_MSc_plot$Group)
+lda_MSc_plot$Group[lda_MSc_plot$Group == "1"] <- "Control"
+lda_MSc_plot$Group[lda_MSc_plot$Group == "2"] <- "RRMS"
+factor(lda_MSc_plot$Group) -> Group
+pdf("pca-lda_MSc_LD1.pdf")
+p1_MSc <- ggplot(lda_MSc_plot, aes(x=LD1, colour = Group)) + geom_density(aes(fill = Group), alpha=0.7, position="identity") + 
+  scale_fill_manual(values=c("#fecc5c", "#bd0026")) + ggtitle("LDA of top 8 contribition PCs")  +
+  theme_light() + geom_vline(xintercept = 0.10) + scale_x_continuous(limits = c(-3.8, 4)) 
+p1_MSc + theme(text = element_text(size = 16), plot.title = element_text(margin = ggplot2::margin(b = 20, unit = "pt"))) -> p1_MSc
+p1_MSc
+dev.off()
+
+## Model training and CV resampling, preparing data for ROC-plotting
+##1 PCA-LDA Model cross-validation
+training_scaled_MSc_v2 -> scaled_MSc_C_sup
+scaled_MSc_C_sup$Group <- as.character(scaled_MSc_C_sup$Group)
+scaled_MSc_C_sup$Group[scaled_MSc_C_sup$Group == "1"] <- "Control"
+scaled_MSc_C_sup$Group[scaled_MSc_C_sup$Group == "2"] <- "RRMS"
+as.factor(scaled_MSc_C_sup$Group) -> scaled_MSc_C_sup$Group
+Model_pcaLDA_loocv <- train(Group ~., data=scaled_MSc_C_sup[, -1], method = "lda", preProcess = "pca",
+                            trControl = trainControl(method="repeatedcv", summaryFunction=twoClassSummary, number = 5, repeats = 20, classProbs=TRUE, savePredictions = TRUE),
+                            preProcOptions = list(pcaComp = 8))
+pred_CV_pcaLDA = predict(Model_pcaLDA_loocv, newdata = scaled_MSc_C_sup[, -1], type="prob")
+Modeltype <- factor(rep("PCA-LDA", nrow(Model_pcaLDA_loocv$pred)))
+cbind(Model_pcaLDA_loocv$pred, Modeltype) -> pca.lda.MSc
+pca.lda.MSc[, which(colnames(pca.lda.MSc)!=c("rowIndex", "parameter"))] ->  pca.lda.MSc
+## PCA-LDA model evaluation on validation dataset
+as.data.frame(predict(Model_pcaLDA_loocv, validation_scaled_MSc_v2[, -1:-2], type = "prob")) -> predicted_pcalda
+as.character(predict(Model_pcaLDA_loocv, validation_scaled_MSc_v2[, -1:-2], type = "raw")) -> predicted_pcalda_class
+rep("PCA-LDA", length(predicted_pcalda_class)) -> Modeltype.validation.pcalda
+cbind(validation_scaled_MSc_v2$Group, predicted_pcalda_class, predicted_pcalda, Modeltype.validation.pcalda) -> PCALDA_validation
+names(PCALDA_validation) <- c("obs","pred", "Control", "RRMS", "Modeltype")
+confusionMatrix(PCALDA_validation$obs, PCALDA_validation$pred, positive="RRMS") -> PCALDA_confmatrix
+
+## Random Forest classification
+customRF <- list(type = "Classification", library = "randomForest", loop = NULL)
+customRF$parameters <- data.frame(parameter = c("mtry", "ntree"), class = rep("numeric", 2), label = c("mtry", "ntree"))
+customRF$grid <- function(x, y, len = NULL, search = "grid") {}
+customRF$fit <- function(x, y, wts, param, lev, last, weights, classProbs, ...) {
+  randomForest(x, y, mtry = param$mtry, ntree=param$ntree, ...)
+}
+customRF$predict <- function(modelFit, newdata, preProc = NULL, submodels = NULL)
+  predict(modelFit, newdata)
+customRF$prob <- function(modelFit, newdata, preProc = NULL, submodels = NULL)
+  predict(modelFit, newdata, type = "prob")
+customRF$sort <- function(x) x[order(x[,1]),]
+customRF$levels <- function(x) x$classes
+## building Model based on custom random forest function and tuning parameters
+set.seed(528)
+Model_customRF <- train(Group ~., data=training_MSc_v2[, -1], method = customRF,
+                              trControl = trainControl(method="repeatedcv", number = 5, repeats = 20, summaryFunction=twoClassSummary, savePredictions = TRUE, classProbs = TRUE), tuneGrid = expand.grid(.mtry=c(2:39), .ntree=c(25,50,75,100,200,500,1000)))
+Model_customRF$bestTune ## use optimal tuning parameteres to compare ROC of RF Model with others
+Model_customRF$results$Sens -> Sens
+Model_customRF$results$Spec -> Spec
+Model_customRF$results[which(Sens == max(Sens)), ] ## best tuning for sensitivity
+Model_customRF$results[which(Spec == max(Spec)), ] ## best tuning for specificity
+Model_customRF$results[which(rowSums(Model_customRF$results[, 4:5])==max(rowSums(Model_customRF$results[, 4:5]))), ] 
+## best tuning for sum specificity and sensitivity
+Model_customRF$results[which(rowSums(Model_customRF$results[, 3:5])==max(rowSums(Model_customRF$results[, 3:5]))), ]
+pdf("Model_tuneRF.pdf")
+plot(Model_customRF, xlab = "Selected number of features", lwd =2) -> plot_RF
+plot_RF
+dev.off()
+## Random forest model traing with determined best tune parameters
+set.seed(528)
+mtryGrid <- expand.grid(mtry = 25)
+Model_RF <- train(Group ~., data=training_MSc_v2[, -1], method = "rf",
+                        trControl = trainControl(method="repeatedcv", number = 5, repeats = 20, summaryFunction=twoClassSummary, classProbs=T, savePredictions = TRUE), tuneGrid = mtryGrid, ntree = 500)
+Model_RF$finalModel
+Modeltype <- factor(rep("RF", nrow(Model_RF$pred)))
+cbind(Model_RF$pred, Modeltype) -> RF.MSc
+RF.MSc[, which(colnames(RF.MSc)!=c("rowIndex", "mtry"))] ->  RnF.MSc
+
+##Random Forest testing on validation dataset
+as.data.frame(predict(Model_RF, validation_MSc_v2[, -1:-2], type = "prob")) -> predicted_rf
+as.character(predict(Model_RF, validation_MSc_v2[, -1:-2], type = "raw")) -> predicted_rf_class
+rep("RF", length(predicted_rf_class)) -> Modeltype.validation.rf
+cbind(validation_MSc_v2$Group, predicted_rf_class, predicted_rf, Modeltype.validation.rf) -> RF_validation
+names(RF_validation) <- c("obs", "pred", "Control", "RRMS", "Modeltype")
+confusionMatrix(RF_validation$obs, RF_validation$pred, positive="RRMS") -> RF_confmatrix
+
+## Random forest on preselected markers
+## Tunning model
+set.seed(528)
+Model_customRF_selected <- train(Group ~., data=training_MSc_v2_selected[, -1], method = customRF,
+                              trControl = trainControl(method="repeatedcv", number = 5, repeats = 20, summaryFunction=twoClassSummary, classProbs=TRUE, savePredictions = TRUE), tuneGrid = expand.grid(.mtry=c(2:4), .ntree=c(25,50,75,100,200, 500, 1000)))
+Model_customRF_selected$pred$pred
+Model_customRF_selected$bestTune ## use optimal tuning parameteres to compare ROC of RF Model with others
+Model_customRF_selected$results$Sens -> Sens
+Model_customRF_selected$results$Spec -> Spec
+Model_customRF_selected$results[which(Sens == max(Sens)), ] ## best tuning for sensitivity
+Model_customRF_selected$results[which(Spec == max(Spec)), ] ## best tuning for specificity
+Model_customRF_selected$results[which(rowSums(Model_customRF_selected$results[, 4:5])==max(rowSums(Model_customRF_selected$results[, 4:5]))), ] 
+## best tuning for sum specificity and sensitivity
+Model_customRF_selected$results[which(rowSums(Model_customRF_selected$results[, 3:5])==max(rowSums(Model_customRF_selected$results[, 3:5]))), ]
+Model_customRF_selected$bestTune
+## training best tune model with selected parameters
+set.seed(528)
+mtryGrid <- expand.grid(mtry = 3)
+Model_RF_selected <- train(Group ~., data=training_MSc_v2_selected[, -1], method = "rf",
+                        trControl = trainControl(method="repeatedcv", number = 5, repeats = 20, summaryFunction=twoClassSummary, classProbs=T, savePredictions = TRUE), tuneGrid = mtryGrid, ntree = 500)
+## ROC of RF model
+Modeltype <- factor(rep("sel-RF", nrow(Model_RF_selected$pred)))
+cbind(Model_RF_selected$pred, Modeltype) -> RF.MSc.sel
+RF.MSc.sel[, which(colnames(RF.MSc)!=c("rowIndex", "mtry"))] ->  RnF.MSc.sel
+
+##Random Forest testing on validation dataset
+as.data.frame(predict(Model_RF_selected, validation_MSc_v2_selected[, -1:-2], type = "prob")) -> predicted_rf.sel
+as.character(predict(Model_RF_selected, validation_MSc_v2_selected[, -1:-2], type = "raw")) -> predicted_rf_class.sel
+rep("RF-sel", length(predicted_rf_class.sel)) -> Modeltype.validation.rf.sel
+cbind(validation_MSc_v2_selected$Group, predicted_rf_class.sel, predicted_rf.sel, Modeltype.validation.rf.sel) -> RF_validation.sel
+names(RF_validation.sel) <- c("obs", "pred", "Control", "RRMS", "Modeltype")
+confusionMatrix(RF_validation.sel$obs, RF_validation.sel$pred, positive="RRMS") -> RF_confmatrix.sel
+
+## ROC plots comparing three Models for cross-validation:
+colnames(PLS.caret.cv)[5] <- "Modeltype"
+rbind(pca.lda.MSc[, -5], RnF.MSc.sel[, -5], PLS.caret.cv, RnF.MSc[, -5], GLM.MSc.unsc[, -5]) -> MSc_ROC1
+factor(MSc_ROC1$obs) -> MSc_ROC1$obs
+as.numeric(MSc_ROC1$Control)  -> MSc_ROC1$Control
+as.numeric(MSc_ROC1$RRMS) -> MSc_ROC1$RRMS
+pdf("ROC_MSc3.pdf")
+ggplot(MSc_ROC1, aes(m=RRMS, d=obs, colour = Modeltype)) + geom_roc(aes(linetype = Modeltype), n.cuts = 0) +
+  scale_linetype_manual(values = c("solid", "longdash", "dotdash",  "solid", "dashed")) +
+  coord_equal() + style_roc(xlab = "False positive fraction (1 - specificity)", ylab = "True positive fraction (sensitivity)") +
+  labs(title = "Cross validation on training set", subtitle = "RRMS vs Control groups") + color_palette(palette = c("#1905eb", "#0f6627", "#e78118", "#ff0a11", "#0a0002")) + 
+  theme(axis.text.x=element_text(angle = -45, hjust = 0), axis.text = element_text(size=rel(1.1)), axis.title = element_text(size=rel(1.3)), 
+        legend.text = element_text(size = rel(1.0)), legend.title = element_text(size = rel(1.0)), plot.title = element_text(face = "bold", 
+                                                                                                                             hjust = 0.7, size = 14), plot.subtitle = element_text(size = 14)) -> ROC2
+
+ROC2 + annotate("text", x=0.70, y=0.45, colour = "#1905eb", label=paste("PCA-LDA, AUC =", round((calc_auc(ROC2))$AUC[1], 3))) + 
+  annotate("text", x=0.70, y=0.375, colour = "#0f6627", label=paste("RF-presel, AUC =", round((calc_auc(ROC2))$AUC[2], 3))) +
+  annotate("text", x=0.70, y=0.3, colour = "#e78118", label=paste("PLS-DA, AUC =", round((calc_auc(ROC2))$AUC[3], 3))) +
+  annotate("text", x=0.70, y=0.225, colour = "#ff0a11", label=paste("RF, AUC =", round((calc_auc(ROC2))$AUC[4], 3))) +
+  annotate("text", x=0.70, y=0.150, colour = "#0a0002", label=paste("GLM, AUC =", round((calc_auc(ROC2))$AUC[5], 3)))-> ROC2
+ROC2
+dev.off()
+## Estimation of the AUC area
+ci.cvAUC(pca.lda.MSc$RRMS, pca.lda.MSc$obs, label.ordering = NULL, folds = NULL, confidence = 0.95) -> AUC_PCA.LDA
+ci.cvAUC(PLS.caret.cv$RRMS, PLS.caret.cv$obs, label.ordering = NULL, folds = NULL, confidence = 0.95) -> AUC_PLSDA
+ci.cvAUC(RnF.MSc$RRMS, RnF.MSc$obs, label.ordering = NULL, folds = NULL, confidence = 0.95) -> AUC_RF
+ci.cvAUC(RnF.MSc.sel$RRMS, RnF.MSc.sel$obs, label.ordering = NULL, folds = NULL, confidence = 0.95) -> AUC_RF.sel
+ci.cvAUC(GLM.MSc$RRMS, GLM.MSc$obs, label.ordering = NULL, folds = NULL, confidence = 0.95) -> AUC_GLM
+c(AUC_PCA.LDA$cvAUC[1], AUC_PLSDA$cvAUC[1], AUC_RF$cvAUC[1], AUC_RF.sel$cvAUC[1], AUC_GLM$cvAUC[1]) -> AreaUC
+c(AUC_PCA.LDA$ci[1], AUC_PLSDA$ci[1], AUC_RF$ci[1], AUC_RF.sel$ci[1], AUC_GLM$ci[1]) -> AreaUC.lower
+c(AUC_PCA.LDA$ci[2], AUC_PLSDA$ci[2], AUC_RF$ci[2], AUC_RF.sel$ci[2], AUC_GLM$ci[2]) -> AreaUC.upper
+Marker <- c("PCA-LDA", "PLSDA", "RandomForest", "RandomForest on 4 markers", "GLM")
+as.data.frame(cbind(Marker, AreaUC, AreaUC.lower, AreaUC.upper)) -> univ.model.AUC
+write.xlsx(univ.model.AUC, "~/table5.xlsx")
+
+## ROC plots comparing three Models in validation test sets
+PCALDA_validation
+RF_validation.sel
+PLS_validation
+RF_validation
+GLM_validation
+rbind(PCALDA_validation, RF_validation.sel, PLS_validation, RF_validation, GLM_validation) -> MSc_val_ROC
+factor(MSc_val_ROC$obs) -> MSc_val_ROC$obs
+as.numeric(MSc_val_ROC$Control)  -> MSc_val_ROC$Control
+as.numeric(MSc_val_ROC$RRMS) -> MSc_val_ROC$RRMS
+pdf("ROC_MSc_validation1.pdf")
+ggplot(MSc_val_ROC, aes(m=RRMS, d=obs, colour = Modeltype)) + geom_roc(aes(linetype = Modeltype), n.cuts = 0) +
+  scale_linetype_manual(values = c("solid", "longdash", "dotdash",  "solid", "dashed")) +
+  coord_equal() + style_roc(xlab = "False positive fraction (1 - specificity)", ylab = "True positive fraction (sensitivity)") +
+  labs(title = "Validation of the models on testing set", subtitle = "RRMS vs Control groups") + color_palette(palette = c("#1905eb", "#0f6627", "#e78118", "#ff0a11", "#0a0002")) + 
+  theme(axis.text.x=element_text(angle = -45, hjust = 0), axis.text = element_text(size=rel(1.1)), axis.title = element_text(size=rel(1.3)), 
+        legend.text = element_text(size = rel(1.0)), legend.title = element_text(size = rel(1.0)), plot.title = element_text(face = "bold", 
+                                                                                                                             hjust = 0.7, size = 14), plot.subtitle = element_text(size = 14)) -> ROC3
+
+ROC3 + annotate("text", x=0.70, y=0.45, colour = "#1905eb", label=paste("PCA-LDA, AUC =", round((calc_auc(ROC3))$AUC[1], 4))) + 
+  annotate("text", x=0.70, y=0.375, colour = "#0f6627", label=paste("RF-presel, AUC =", round((calc_auc(ROC3))$AUC[2], 4))) +
+  annotate("text", x=0.70, y=0.3, colour = "#e78118", label=paste("PLS-DA, AUC =", round((calc_auc(ROC3))$AUC[3], 4))) +
+  annotate("text", x=0.70, y=0.225, colour = "#ff0a11", label=paste("RF, AUC =", round((calc_auc(ROC3))$AUC[4], 4))) +
+  annotate("text", x=0.70, y=0.150, colour = "#0a0002", label=paste("GLM, AUC =", round((calc_auc(ROC3))$AUC[5], 4))) -> ROC3
+ROC3
+dev.off()
+ci.cvAUC(PCALDA_validation$RRMS, PCALDA_validation$obs, label.ordering = NULL, folds = NULL, confidence = 0.95) -> AUC_PCA.LDA.v
+ci.cvAUC(PLS_validation$RRMS, PLS_validation$obs, label.ordering = NULL, folds = NULL, confidence = 0.95) -> AUC_PLSDA.v
+ci.cvAUC(RF_validation$RRMS, RF_validation$obs, label.ordering = NULL, folds = NULL, confidence = 0.95) -> AUC_RF.v
+ci.cvAUC(RF_validation.sel$RRMS, RF_validation.sel$obs, label.ordering = NULL, folds = NULL, confidence = 0.95) -> AUC_RF.sel.v
+ci.cvAUC(GLM_validation$RRMS, GLM_validation$obs, label.ordering = NULL, folds = NULL, confidence = 0.95) -> AUC_GLM.v
+c(AUC_PCA.LDA.v$cvAUC[1], AUC_PLSDA.v$cvAUC[1], AUC_RF.v$cvAUC[1], AUC_RF.sel.v$cvAUC[1], AUC_GLM.v$cvAUC[1]) -> AreaUC
+c(AUC_PCA.LDA.v$ci[1], AUC_PLSDA.v$ci[1], AUC_RF.v$ci[1], AUC_RF.sel.v$ci[1], AUC_GLM.v$ci[1]) -> AreaUC.lower
+c(AUC_PCA.LDA.v$ci[2], AUC_PLSDA.v$ci[2], AUC_RF.v$ci[2], AUC_RF.sel.v$ci[2], AUC_GLM.v$ci[2]) -> AreaUC.upper
+as.data.frame(cbind(Marker, AreaUC, AreaUC.lower, AreaUC.upper)) -> model.AUC.validation
+write.xlsx(model.AUC.validation, "~/table6.xlsx")
+
+PCALDA_validation
+PLS_validation
+RF_validation.sel
+GLM_validation
+RF_validation
+##
+grid.arrange(ROC2, ROC3, nrow = 1)
+top = text_grob("Mutltivariate models comparison", color = "black", face = "bold", size = 20)
+
+title <- ggdraw() + draw_label("Multivariate models comparison", fontface='bold', size = 20)
+pdf("Figure4.pdf", width = 12, height = 6)
+ggdraw() +
+  draw_plot(ROC2, x = 0, y = .01, width = .5, height = .96) +
+  draw_plot(ROC3, x = .5, y = .01, width = .5, height = .96) +
+  draw_plot_label(label = c("A", "B"), size = 25,
+                  x = c(0, 0.5), y = c(0.96, 0.96)) -> figure4
+plot_grid(title, figure4, ncol=1, rel_heights=c(0.1, 1)) # rel_heights values control title margins
+dev.off()
+
+title1 <- ggdraw() + draw_label("Random forest tunning in cross-validation", fontface='bold', size = 20)
+plot(Model_customRF_selected, xlab = "Selected number of trees", lwd =2) -> plot_RF_sel
+plot(Model_customRF, xlab = "Selected number of features", lwd =2, main="Random forest model tunning in cross-validation") -> plot_RF
+pdf("Figure S2.pdf", width = 6, height = 6)
+par(mfrow=c(2,1))
+plot_RF
+plot_RF_sel
+dev.off()
